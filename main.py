@@ -4,6 +4,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+LAST_RUN = "No runs yet"
+
 
 def parse_params(args):
     params = {}
@@ -162,7 +164,14 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Status online")
 
 
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global LAST_RUN
+    await update.message.reply_text(LAST_RUN)
+
+
 async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global LAST_RUN
+
     if not context.args:
         await update.message.reply_text("Use /auto SPORT=football LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good MINS=120 LINEUP=yes")
         return
@@ -199,6 +208,8 @@ async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "AUTO " + "sport=" + sport + " league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " ev=" + str(ev) + " books=" + str(books) + " data=" + data_quality + " mins=" + str(mins_to_start) + " lineup=" + lineup + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
 
+    LAST_RUN = text
+
     await update.message.reply_text(text)
 
 
@@ -209,6 +220,7 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("auto", auto_cmd))
     app.run_polling(drop_pending_updates=True)
 
