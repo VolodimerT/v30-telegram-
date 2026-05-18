@@ -21,6 +21,13 @@ def to_float(value, default_value):
         return default_value
 
 
+def to_int(value, default_value):
+    try:
+        return int(float(value))
+    except:
+        return default_value
+
+
 def normalize_mode(value):
     v = str(value).lower()
     if v == "emergency":
@@ -35,7 +42,31 @@ def normalize_strict(value):
     return 0
 
 
-def decide(odds, bank, mode, strict_flag):
+def normalize_data(value):
+    v = str(value).lower()
+    if v in ["good", "ok", "fresh"]:
+        return "good"
+    if v in ["bad", "stale", "poor"]:
+        return "bad"
+    return "unknown"
+
+
+def decide(odds, bank, mode, strict_flag, ev, books, data_quality):
+    if books < 2:
+        return "PASS", 0.0, "LOW_BOOK_COUNT"
+
+    if data_quality == "bad":
+        return "PASS", 0.0, "LOW_DATA_QUALITY"
+
+    if ev < 0:
+        return "PASS", 0.0, "EV_NEGATIVE"
+
+    if strict_flag == 1 and ev < 5:
+        return "PASS", 0.0, "STRICT_EV_TOO_LOW"
+
+    if mode == "emergency" and ev < 4:
+        return "PASS", 0.0, "EMERGENCY_EV_TOO_LOW"
+
     if odds > 3.00:
         return "PASS", 0.0, "ODDS_TOO_HIGH"
 
@@ -57,6 +88,12 @@ def decide(odds, bank, mode, strict_flag):
         bet_class = "MICRO"
         pct = 0.01
         reason = "HIGH_RISK_MICRO"
+
+    if ev >= 8 and bet_class == "SUPPORT":
+        bet_class = "CORE"
+
+    if ev < 3 and bet_class == "CORE":
+        bet_class = "SUPPORT"
 
     if mode == "emergency":
         if bet_class == "CORE":
@@ -84,7 +121,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Use /auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0")
+        await update.message.reply_text("Use /auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good")
         return
 
     params = parse_params(context.args)
@@ -97,10 +134,13 @@ async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bank = to_float(params.get("BANK", "100"), 100.0)
     mode = normalize_mode(params.get("MODE", "normal"))
     strict_flag = normalize_strict(params.get("STRICT", "0"))
+    ev = to_float(params.get("EV", "0"), 0.0)
+    books = to_int(params.get("BOOKS", "1"), 1)
+    data_quality = normalize_data(params.get("DATA", "unknown"))
 
-    bet_class, stake, reason = decide(odds, bank, mode, strict_flag)
+    bet_class, stake, reason = decide(odds, bank, mode, strict_flag, ev, books, data_quality)
 
-    text = "AUTO " + "league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
+    text = "AUTO " + "league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " ev=" + str(ev) + " books=" + str(books) + " data=" + data_quality + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
 
     await update.message.reply_text(text)
 
