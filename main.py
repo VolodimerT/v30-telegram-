@@ -1,4 +1,5 @@
 import os
+import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -6,6 +7,10 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 LAST_RUN = "No runs yet"
 RUNS = []
+
+LAST_RUN_FILE = "last_run.txt"
+RUNS_FILE = "runs.txt"
+AUDIT_FILE = "audit.json"
 
 
 def parse_params(args):
@@ -178,6 +183,86 @@ def extract_value(text, key):
     return ""
 
 
+def save_last_run():
+    global LAST_RUN
+    try:
+        with open(LAST_RUN_FILE, "w", encoding="utf-8") as f:
+            f.write(LAST_RUN)
+    except:
+        pass
+
+
+def save_runs():
+    global RUNS
+    try:
+        with open(RUNS_FILE, "w", encoding="utf-8") as f:
+            for item in RUNS:
+                f.write(item + "
+")
+    except:
+        pass
+
+
+def build_audit_dict(text):
+    data = {}
+    data["raw"] = text
+    data["kind"] = text.split(" ")[0] if " " in text else text
+    data["sport"] = extract_value(text, "sport")
+    data["league"] = extract_value(text, "league")
+    data["team"] = extract_value(text, "team")
+    data["market"] = extract_value(text, "market")
+    data["odds"] = extract_value(text, "odds")
+    data["bank"] = extract_value(text, "bank")
+    data["mode"] = extract_value(text, "mode")
+    data["strict"] = extract_value(text, "strict")
+    data["ev"] = extract_value(text, "ev")
+    data["books"] = extract_value(text, "books")
+    data["data"] = extract_value(text, "data")
+    data["mins"] = extract_value(text, "mins")
+    data["lineup"] = extract_value(text, "lineup")
+    data["class"] = extract_value(text, "class")
+    data["stake"] = extract_value(text, "stake")
+    data["reason"] = extract_value(text, "reason")
+    return data
+
+
+def save_audit(text):
+    try:
+        data = build_audit_dict(text)
+        with open(AUDIT_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=True)
+    except:
+        pass
+
+
+def load_files_to_memory():
+    global LAST_RUN
+    global RUNS
+
+    try:
+        if os.path.exists(LAST_RUN_FILE):
+            with open(LAST_RUN_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content != "":
+                    LAST_RUN = content
+    except:
+        pass
+
+    try:
+        if os.path.exists(RUNS_FILE):
+            with open(RUNS_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                temp = []
+                for line in lines:
+                    item = line.strip()
+                    if item != "":
+                        temp.append(item)
+                if len(temp) > 0:
+                    RUNS = temp[:5]
+    except:
+        pass
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot online")
 
@@ -187,7 +272,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Commands: /status /auto /dryrun /report /history /summary /help ; Format: SPORT=football LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good MINS=120 LINEUP=yes"
+    text = "Commands: /status /auto /dryrun /report /history /summary /audit /files /help ; Format: SPORT=football LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good MINS=120 LINEUP=yes"
     await update.message.reply_text(text)
 
 
@@ -234,6 +319,41 @@ async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     accepted = " | ".join(non_pass)
     text = "SUMMARY total=" + str(total) + " pass=" + str(pass_count) + " active=" + str(len(non_pass)) + " picks=" + accepted
+    await update.message.reply_text(text)
+
+
+async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global LAST_RUN
+    if LAST_RUN == "No runs yet":
+        await update.message.reply_text("AUDIT No runs yet")
+        return
+
+    kind = extract_value(LAST_RUN, "sport")
+    cls = extract_value(LAST_RUN, "class")
+    reason = extract_value(LAST_RUN, "reason")
+    stake = extract_value(LAST_RUN, "stake")
+    ev = extract_value(LAST_RUN, "ev")
+    books = extract_value(LAST_RUN, "books")
+    data_quality = extract_value(LAST_RUN, "data")
+
+    text = "AUDIT " + "sport=" + kind + " class=" + cls + " stake=" + stake + " ev=" + ev + " books=" + books + " data=" + data_quality + " reason=" + reason
+    await update.message.reply_text(text)
+
+
+async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    files = []
+    if os.path.exists(LAST_RUN_FILE):
+        files.append(LAST_RUN_FILE)
+    if os.path.exists(RUNS_FILE):
+        files.append(RUNS_FILE)
+    if os.path.exists(AUDIT_FILE):
+        files.append(AUDIT_FILE)
+
+    if len(files) == 0:
+        await update.message.reply_text("FILES none")
+        return
+
+    text = "FILES " + " ".join(files)
     await update.message.reply_text(text)
 
 
@@ -302,6 +422,9 @@ async def run_analysis(update, context, dry_mode):
 
     LAST_RUN = text
     add_run(text)
+    save_last_run()
+    save_runs()
+    save_audit(text)
 
     await update.message.reply_text(text)
 
@@ -315,6 +438,8 @@ async def dryrun_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    load_files_to_memory()
+
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN not set")
 
@@ -325,6 +450,8 @@ def main():
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("summary", summary_cmd))
+    app.add_handler(CommandHandler("audit", audit_cmd))
+    app.add_handler(CommandHandler("files", files_cmd))
     app.add_handler(CommandHandler("auto", auto_cmd))
     app.add_handler(CommandHandler("dryrun", dryrun_cmd))
     app.run_polling(drop_pending_updates=True)
