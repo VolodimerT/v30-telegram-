@@ -195,10 +195,9 @@ def save_last_run():
 def save_runs():
     global RUNS
     try:
+        text = " || ".join(RUNS)
         with open(RUNS_FILE, "w", encoding="utf-8") as f:
-            for item in RUNS:
-                f.write(item + "
-")
+            f.write(text)
     except:
         pass
 
@@ -251,14 +250,9 @@ def load_files_to_memory():
     try:
         if os.path.exists(RUNS_FILE):
             with open(RUNS_FILE, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                temp = []
-                for line in lines:
-                    item = line.strip()
-                    if item != "":
-                        temp.append(item)
-                if len(temp) > 0:
-                    RUNS = temp[:5]
+                content = f.read().strip()
+                if content != "":
+                    RUNS = content.split(" || ")[:5]
     except:
         pass
 
@@ -328,7 +322,7 @@ async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("AUDIT No runs yet")
         return
 
-    kind = extract_value(LAST_RUN, "sport")
+    sport = extract_value(LAST_RUN, "sport")
     cls = extract_value(LAST_RUN, "class")
     reason = extract_value(LAST_RUN, "reason")
     stake = extract_value(LAST_RUN, "stake")
@@ -336,7 +330,7 @@ async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     books = extract_value(LAST_RUN, "books")
     data_quality = extract_value(LAST_RUN, "data")
 
-    text = "AUDIT " + "sport=" + kind + " class=" + cls + " stake=" + stake + " ev=" + ev + " books=" + books + " data=" + data_quality + " reason=" + reason
+    text = "AUDIT " + "sport=" + sport + " class=" + cls + " stake=" + stake + " ev=" + ev + " books=" + books + " data=" + data_quality + " reason=" + reason
     await update.message.reply_text(text)
 
 
