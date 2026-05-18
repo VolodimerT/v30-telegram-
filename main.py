@@ -51,7 +51,37 @@ def normalize_data(value):
     return "unknown"
 
 
-def decide(odds, bank, mode, strict_flag, ev, books, data_quality):
+def normalize_lineup(value):
+    v = str(value).lower()
+    if v in ["yes", "true", "1", "confirmed"]:
+        return "yes"
+    return "no"
+
+
+def normalize_sport(value):
+    v = str(value).lower()
+    if v in ["football", "basketball", "hockey", "tennis"]:
+        return v
+    return "unknown"
+
+
+def lower_class(bet_class):
+    if bet_class == "CORE":
+        return "SUPPORT"
+    if bet_class == "SUPPORT":
+        return "MICRO"
+    if bet_class == "MICRO":
+        return "PASS"
+    return "PASS"
+
+
+def decide(odds, bank, mode, strict_flag, ev, books, data_quality, mins_to_start, lineup, sport):
+    if mins_to_start <= 0:
+        return "PASS", 0.0, "EXPIRED_EVENT"
+
+    if mins_to_start < 10:
+        return "PASS", 0.0, "TOO_CLOSE"
+
     if books < 2:
         return "PASS", 0.0, "LOW_BOOK_COUNT"
 
@@ -95,6 +125,19 @@ def decide(odds, bank, mode, strict_flag, ev, books, data_quality):
     if ev < 3 and bet_class == "CORE":
         bet_class = "SUPPORT"
 
+    if lineup == "no":
+        if mode == "emergency":
+            return "PASS", 0.0, "LINEUP_PENDING"
+        bet_class = lower_class(bet_class)
+        reason = "LINEUP_NOT_CONFIRMED"
+
+    if sport == "unknown":
+        bet_class = lower_class(bet_class)
+        reason = "UNKNOWN_SPORT"
+
+    if bet_class == "PASS":
+        return "PASS", 0.0, reason
+
     if mode == "emergency":
         if bet_class == "CORE":
             pct = 0.02
@@ -121,11 +164,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Use /auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good")
+        await update.message.reply_text("Use /auto SPORT=football LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good MINS=120 LINEUP=yes")
         return
 
     params = parse_params(context.args)
 
+    sport = normalize_sport(params.get("SPORT", "unknown"))
     league = params.get("LEAGUE", "UNKNOWN")
     team = params.get("TEAM", "UNKNOWN")
     market = params.get("MARKET", "ML")
@@ -137,10 +181,23 @@ async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ev = to_float(params.get("EV", "0"), 0.0)
     books = to_int(params.get("BOOKS", "1"), 1)
     data_quality = normalize_data(params.get("DATA", "unknown"))
+    mins_to_start = to_int(params.get("MINS", "999"), 999)
+    lineup = normalize_lineup(params.get("LINEUP", "no"))
 
-    bet_class, stake, reason = decide(odds, bank, mode, strict_flag, ev, books, data_quality)
+    bet_class, stake, reason = decide(
+        odds,
+        bank,
+        mode,
+        strict_flag,
+        ev,
+        books,
+        data_quality,
+        mins_to_start,
+        lineup,
+        sport
+    )
 
-    text = "AUTO " + "league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " ev=" + str(ev) + " books=" + str(books) + " data=" + data_quality + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
+    text = "AUTO " + "sport=" + sport + " league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " ev=" + str(ev) + " books=" + str(books) + " data=" + data_quality + " mins=" + str(mins_to_start) + " lineup=" + lineup + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
 
     await update.message.reply_text(text)
 
