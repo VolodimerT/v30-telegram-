@@ -1,46 +1,73 @@
 import os
+import logging
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ /auto =====
 
-def parse_auto_request(text: str) -> dict:
-    """
-    Очень простое временное парсило:
-    /auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100
-    """
-    parts = text.strip().split()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("/start from chat_id=%s", update.effective_chat.id if update.effective_chat else None)
+    await update.message.reply_text(
+        "V30 bot online.
+"
+        "Команды:
+"
+        "/status
+"
+        "/auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100"
+    )
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("/status from chat_id=%s", update.effective_chat.id if update.effective_chat else None)
+    await update.message.reply_text("Status: online")
+
+
+async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("/auto triggered, raw text=%s, args=%s", update.message.text if update.message else None, context.args)
+
+    if not context.args:
+        await update.message.reply_text(
+            "Формат:
+"
+            "/auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100"
+        )
+        return
+
     params = {}
-
-    for part in parts:
+    for part in context.args:
         if "=" in part:
             key, value = part.split("=", 1)
             params[key.upper()] = value
 
-    return {
-        "league": params.get("LEAGUE", "UNKNOWN"),
-        "team": params.get("TEAM", "UNKNOWN"),
-        "market": params.get("MARKET", "ML"),
-        "odds": float(params.get("ODDS", "1.80")),
-        "bank": float(params.get("BANK", "100")),
-    }
+    league = params.get("LEAGUE", "UNKNOWN")
+    team = params.get("TEAM", "UNKNOWN")
+    market = params.get("MARKET", "ML")
 
+    try:
+        odds = float(params.get("ODDS", "1.80"))
+    except ValueError:
+        await update.message.reply_text("Ошибка: ODDS должен быть числом. Пример: ODDS=1.85")
+        return
 
-def simple_decision_engine(request: dict) -> dict:
-    """
-    Фейковый deterministic engine, чтобы был формат:
-    возвращает class + stake + причины.
-    Логика: чем выше коэффициент, тем ниже класс и доля банка.
-    """
-    odds = request["odds"]
-    bank = request["bank"]
+    try:
+        bank = float(params.get("BANK", "100"))
+    except ValueError:
+        await update.message.reply_text("Ошибка: BANK должен быть числом. Пример: BANK=100")
+        return
 
     if odds <= 1.6:
         bet_class = "CORE"
@@ -61,79 +88,33 @@ def simple_decision_engine(request: dict) -> dict:
 
     stake = round(bank * stake_pct, 2)
 
-    return {
-        "class": bet_class,
-        "stake": stake,
-        "stake_pct": round(stake_pct * 100, 2),
-        "reason": reason,
-    }
-
-
-# ===== HANDLERS =====
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "V30 bot online.
-"
-        "Команды:
-"
-        "/status — проверить статус
-"
-        "/auto LEAGUE=... TEAM=... MARKET=... ODDS=... BANK=...
-"
-        "Пример:
-"
-        "/auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100"
-    )
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Status: online")
-
-
-async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Весь текст после /auto
-    args_text = update.message.text.replace("/auto", "", 1).strip()
-
-    if not args_text:
-        await update.message.reply_text(
-            "Нужно передать параметры после /auto.
-"
-            "Пример:
-"
-            "/auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100"
-        )
-        return
-
-    req = parse_auto_request(args_text)
-    decision = simple_decision_engine(req)
-
     reply = (
-        f"V30 AUTO MOCK
+        "V30 AUTO MOCK
 "
-        f"Лига: {req['league']}
+        f"Лига: {league}
 "
-        f"Команда: {req['team']}
+        f"Команда: {team}
 "
-        f"Рынок: {req['market']}
+        f"Рынок: {market}
 "
-        f"Коэфф: {req['odds']}
+        f"Коэфф: {odds}
 "
-        f"Банк: {req['bank']}
+        f"Банк: {bank}
 
 "
-        f"Класс: {decision['class']}
+        f"Класс: {bet_class}
 "
-        f"Ставка: {decision['stake']} ({decision['stake_pct']}% от банка)
+        f"Ставка: {stake} ({round(stake_pct * 100, 2)}% от банка)
 "
-        f"Причина: {decision['reason']}
-
-"
-        f"Это пока только TEST-логика. "
-        f"Дальше сюда подключим настоящий V30 engine."
+        f"Причина: {reason}"
     )
 
     await update.message.reply_text(reply)
+
+
+async def echo_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text if update.message else None
+    logger.info("text message received: %s", text)
 
 
 def main():
@@ -145,8 +126,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("auto", auto_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_debug))
 
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
