@@ -14,14 +14,64 @@ def parse_params(args):
     return params
 
 
-def decide(odds, bank):
+def to_float(value, default_value):
+    try:
+        return float(value)
+    except:
+        return default_value
+
+
+def normalize_mode(value):
+    v = str(value).lower()
+    if v == "emergency":
+        return "emergency"
+    return "normal"
+
+
+def normalize_strict(value):
+    v = str(value).lower()
+    if v in ["1", "true", "yes", "on"]:
+        return 1
+    return 0
+
+
+def decide(odds, bank, mode, strict_flag):
+    if odds > 3.00:
+        return "PASS", 0.0, "ODDS_TOO_HIGH"
+
+    if mode == "emergency" and odds > 2.20:
+        return "PASS", 0.0, "EMERGENCY_ODDS_CAP"
+
+    if strict_flag == 1 and odds > 2.00:
+        return "PASS", 0.0, "STRICT_ODDS_CAP"
+
     if odds <= 1.60:
-        return "CORE", round(bank * 0.03, 2), "low_odds_stable"
-    if odds <= 2.20:
-        return "SUPPORT", round(bank * 0.02, 2), "mid_odds_ok"
-    if odds <= 3.00:
-        return "MICRO", round(bank * 0.01, 2), "high_risk_micro"
-    return "PASS", 0.0, "odds_too_high"
+        bet_class = "CORE"
+        pct = 0.03
+        reason = "LOW_ODDS_STABLE"
+    elif odds <= 2.20:
+        bet_class = "SUPPORT"
+        pct = 0.02
+        reason = "MID_ODDS_OK"
+    else:
+        bet_class = "MICRO"
+        pct = 0.01
+        reason = "HIGH_RISK_MICRO"
+
+    if mode == "emergency":
+        if bet_class == "CORE":
+            pct = 0.02
+        elif bet_class == "SUPPORT":
+            pct = 0.01
+        elif bet_class == "MICRO":
+            pct = 0.005
+
+    stake = round(bank * pct, 2)
+
+    if mode == "emergency" and stake > 25:
+        stake = 25.0
+
+    return bet_class, stake, reason
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -34,7 +84,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Use /auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100")
+        await update.message.reply_text("Use /auto LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0")
         return
 
     params = parse_params(context.args)
@@ -43,21 +93,14 @@ async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = params.get("TEAM", "UNKNOWN")
     market = params.get("MARKET", "ML")
 
-    try:
-        odds = float(params.get("ODDS", "1.80"))
-    except:
-        await update.message.reply_text("Bad ODDS")
-        return
+    odds = to_float(params.get("ODDS", "1.80"), 1.80)
+    bank = to_float(params.get("BANK", "100"), 100.0)
+    mode = normalize_mode(params.get("MODE", "normal"))
+    strict_flag = normalize_strict(params.get("STRICT", "0"))
 
-    try:
-        bank = float(params.get("BANK", "100"))
-    except:
-        await update.message.reply_text("Bad BANK")
-        return
+    bet_class, stake, reason = decide(odds, bank, mode, strict_flag)
 
-    bet_class, stake, reason = decide(odds, bank)
-
-    text = "AUTO " + "league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
+    text = "AUTO " + "league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
 
     await update.message.reply_text(text)
 
