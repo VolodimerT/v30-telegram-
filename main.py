@@ -169,12 +169,26 @@ def add_run(text):
         RUNS = RUNS[:5]
 
 
+def extract_value(text, key):
+    marker = key + "="
+    parts = text.split(" ")
+    for part in parts:
+        if part.startswith(marker):
+            return part[len(marker):]
+    return ""
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot online")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Status online")
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "Commands: /status /auto /dryrun /report /history /summary /help ; Format: SPORT=football LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good MINS=120 LINEUP=yes"
+    await update.message.reply_text(text)
 
 
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,6 +202,38 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No runs yet")
         return
     text = "HISTORY " + " || ".join(RUNS)
+    await update.message.reply_text(text)
+
+
+async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global RUNS
+    if len(RUNS) == 0:
+        await update.message.reply_text("SUMMARY No runs yet")
+        return
+
+    total = len(RUNS)
+    pass_count = 0
+    non_pass = []
+
+    for run in RUNS:
+        cls = extract_value(run, "class")
+        reason = extract_value(run, "reason")
+        team = extract_value(run, "team")
+        stake = extract_value(run, "stake")
+
+        if cls == "PASS":
+            pass_count = pass_count + 1
+        else:
+            item = team + ":" + cls + ":" + stake + ":" + reason
+            non_pass.append(item)
+
+    if pass_count == total:
+        text = "SUMMARY NO_BETS ALL_PASS total=" + str(total)
+        await update.message.reply_text(text)
+        return
+
+    accepted = " | ".join(non_pass)
+    text = "SUMMARY total=" + str(total) + " pass=" + str(pass_count) + " active=" + str(len(non_pass)) + " picks=" + accepted
     await update.message.reply_text(text)
 
 
@@ -275,8 +321,10 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("history", history_cmd))
+    app.add_handler(CommandHandler("summary", summary_cmd))
     app.add_handler(CommandHandler("auto", auto_cmd))
     app.add_handler(CommandHandler("dryrun", dryrun_cmd))
     app.run_polling(drop_pending_updates=True)
