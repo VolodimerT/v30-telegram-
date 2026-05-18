@@ -5,6 +5,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 LAST_RUN = "No runs yet"
+RUNS = []
 
 
 def parse_params(args):
@@ -156,6 +157,18 @@ def decide(odds, bank, mode, strict_flag, ev, books, data_quality, mins_to_start
     return bet_class, stake, reason
 
 
+def build_text(kind, sport, league, team, market, odds, bank, mode, strict_flag, ev, books, data_quality, mins_to_start, lineup, bet_class, stake, reason):
+    text = kind + " " + "sport=" + sport + " league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " ev=" + str(ev) + " books=" + str(books) + " data=" + data_quality + " mins=" + str(mins_to_start) + " lineup=" + lineup + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
+    return text
+
+
+def add_run(text):
+    global RUNS
+    RUNS.insert(0, text)
+    if len(RUNS) > 5:
+        RUNS = RUNS[:5]
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot online")
 
@@ -169,7 +182,16 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(LAST_RUN)
 
 
-async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global RUNS
+    if len(RUNS) == 0:
+        await update.message.reply_text("No runs yet")
+        return
+    text = "HISTORY " + " || ".join(RUNS)
+    await update.message.reply_text(text)
+
+
+async def run_analysis(update, context, dry_mode):
     global LAST_RUN
 
     if not context.args:
@@ -206,11 +228,44 @@ async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sport
     )
 
-    text = "AUTO " + "sport=" + sport + " league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " ev=" + str(ev) + " books=" + str(books) + " data=" + data_quality + " mins=" + str(mins_to_start) + " lineup=" + lineup + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
+    kind = "AUTO"
+
+    if dry_mode:
+        stake = 0.0
+        kind = "DRYRUN"
+
+    text = build_text(
+        kind,
+        sport,
+        league,
+        team,
+        market,
+        odds,
+        bank,
+        mode,
+        strict_flag,
+        ev,
+        books,
+        data_quality,
+        mins_to_start,
+        lineup,
+        bet_class,
+        stake,
+        reason
+    )
 
     LAST_RUN = text
+    add_run(text)
 
     await update.message.reply_text(text)
+
+
+async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_analysis(update, context, False)
+
+
+async def dryrun_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_analysis(update, context, True)
 
 
 def main():
@@ -221,7 +276,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("report", report_cmd))
+    app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("auto", auto_cmd))
+    app.add_handler(CommandHandler("dryrun", dryrun_cmd))
     app.run_polling(drop_pending_updates=True)
 
 
