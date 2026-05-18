@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("/start from chat_id=%s", update.effective_chat.id if update.effective_chat else None)
     await update.message.reply_text(
-        "V30 bot online.
+        "Бот V30 онлайн.
 "
         "Команды:
 "
@@ -72,19 +72,19 @@ async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if odds <= 1.6:
         bet_class = "CORE"
         stake_pct = 0.03
-        reason = "Низкий коэфф → более стабильный сценарий."
+        reason = "Низкий коэфф -> более стабильный сценарий."
     elif odds <= 2.2:
         bet_class = "SUPPORT"
         stake_pct = 0.02
-        reason = "Средний коэфф → рабочий, но не ядро."
+        reason = "Средний коэфф -> рабочий, но не ядро."
     elif odds <= 3.0:
         bet_class = "MICRO"
         stake_pct = 0.01
-        reason = "Повышенный риск → микро вход."
+        reason = "Повышенный риск -> микро вход."
     else:
         bet_class = "PASS"
         stake_pct = 0.0
-        reason = "Слишком высокий коэфф → отказ по risk-гейту."
+        reason = "Слишком высокий коэфф -> отказ по risk-гейту."
 
     stake = round(bank * stake_pct, 2)
 
