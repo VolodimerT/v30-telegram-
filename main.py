@@ -53,8 +53,15 @@ DEFAULT_CONFIG = {
         "basketball": {"tier": 2, "max_class": "CORE"},
         "football": {"tier": 2, "max_class": "CORE"},
         "wnba": {"tier": 3, "max_class": "MICRO"},
+        "euroleague": {"tier": 2, "max_class": "CORE"},
+        "acb": {"tier": 2, "max_class": "SUPPORT"},
+        "laliga": {"tier": 2, "max_class": "CORE"},
     },
 }
+
+LAST_RUN_PATH = BASE_DIR / "last_run.txt"
+RUNS_PATH = BASE_DIR / "runs.txt"
+AUDIT_PATH = BASE_DIR / "audit.json"
 
 
 @dataclass
@@ -115,11 +122,6 @@ class FinalDecision:
     reasons: List[str]
 
 
-LAST_RUN_PATH = BASE_DIR / "last_run.txt"
-RUNS_PATH = BASE_DIR / "runs.txt"
-AUDIT_PATH = BASE_DIR / "audit.json"
-
-
 def parse_mode(bank: float) -> str:
     if bank < 500:
         return "FROZEN"
@@ -134,6 +136,7 @@ def parse_auto_request(text: str, dry_run: bool = False) -> AutoRequest:
     clean = text.strip().lower()
 
     strict = "strict" in clean
+
     sports = []
     for token in ["basketball", "football", "wnba", "euroleague", "acb", "laliga"]:
         if token in clean:
@@ -142,6 +145,7 @@ def parse_auto_request(text: str, dry_run: bool = False) -> AutoRequest:
         sports = ["basketball"]
 
     markets = ["h2h", "spreads", "totals"]
+
     max_candidates = 12
     m = re.search(r"max(?:_candidates)?[=s](d+)", clean)
     if m:
@@ -184,6 +188,7 @@ def calc_ev_raw(model_prob: float, odds: float) -> float:
 
 def calc_data_quality(candidate: Candidate) -> str:
     score = 0
+
     if candidate.book_count >= 5:
         score += 2
     elif candidate.book_count >= 3:
@@ -216,6 +221,7 @@ def calc_data_quality(candidate: Candidate) -> str:
 
 def calibration_factor(candidate: Candidate, data_quality: str) -> float:
     factor = 1.0
+
     if candidate.book_count < 3:
         factor -= 0.25
     if candidate.odds_age_minutes > 120:
@@ -226,11 +232,13 @@ def calibration_factor(candidate: Candidate, data_quality: str) -> float:
         factor -= 0.15
     if data_quality == "LOW":
         factor -= 0.10
+
     return max(0.25, round(factor, 2))
 
 
 def calc_ci_low(ev_calibrated: float, candidate: Candidate, data_quality: str) -> float:
     penalty = 0.0
+
     if candidate.book_count < 3:
         penalty += 5.0
     if candidate.odds_age_minutes > 120:
@@ -241,6 +249,7 @@ def calc_ci_low(ev_calibrated: float, candidate: Candidate, data_quality: str) -
         penalty += 5.0
     if data_quality == "LOW":
         penalty += 3.0
+
     return round(ev_calibrated - penalty, 2)
 
 
@@ -278,6 +287,7 @@ def apply_class_caps(base_class: str, candidate: Candidate, request: AutoRequest
 
 def calculate_risk_cap(request: AutoRequest, decision_class: str) -> float:
     rules = DEFAULT_CONFIG["mode_rules"][request.mode]
+
     if decision_class == "MICRO":
         return rules["max_micro_stake"]
     if decision_class == "SUPPORT":
@@ -290,15 +300,20 @@ def calculate_risk_cap(request: AutoRequest, decision_class: str) -> float:
 def calculate_stake(request: AutoRequest, decision_class: str, ev_calibrated: float, odds: float, risk_cap: float) -> float:
     if decision_class == "PASS":
         return 0.0
+
     b = max(odds - 1.0, 0.01)
     p = max(min((implied_probability(odds) + ev_calibrated) / 100.0, 0.95), 0.01)
     q = 1 - p
     kelly = max(((b * p) - q) / b, 0.0)
     stake = request.bank * kelly * 0.25
     stake = min(stake, risk_cap)
+
     unit = DEFAULT_CONFIG["unit"]
     rounded = math.floor(stake / unit) * unit
-    return float(max(rounded, unit if rounded == 0 and stake > 0 else 0))
+
+    if rounded == 0 and stake > 0:
+        return float(unit)
+    return float(max(rounded, 0))
 
 
 def finalize_decision(candidate: Candidate, request: AutoRequest, run_id: str) -> FinalDecision:
@@ -313,6 +328,7 @@ def finalize_decision(candidate: Candidate, request: AutoRequest, run_id: str) -
 
     decision = "PASS"
     stake = 0.0
+    risk_cap = 0.0
 
     if candidate.commence_time < now:
         reasons.append("EXPIRED_EVENT")
@@ -345,32 +361,16 @@ def finalize_decision(candidate: Candidate, request: AutoRequest, run_id: str) -
             if not reasons:
                 reasons.append("EV_TOO_LOW")
         else:
-            reasons.extend(["EDGE_OK", f"DATA_QUALITY_{data_quality}", f"CLASS_{decision}"])
+            reasons.extend([
+                "EDGE_OK",
+                f"DATA_QUALITY_{data_quality}",
+                f"CLASS_{decision}",
+            ])
             risk_cap = calculate_risk_cap(request, decision)
             stake = calculate_stake(request, decision, ev_cal, candidate.odds_best, risk_cap)
-            return FinalDecision(
-                run_id=run_id,
-                generated_at=now.isoformat(),
-                match=candidate.match,
-                sport=candidate.sport,
-                market=candidate.market,
-                selection=candidate.selection,
-                point=candidate.point,
-                best_odds=candidate.odds_best,
-                avg_odds=candidate.odds_avg,
-                bookmaker=candidate.bookmaker,
-                book_count=candidate.book_count,
-                model_prob=candidate.model_prob,
-                implied_prob=implied,
-                ev_raw=ev_raw,
-                ev_calibrated=ev_cal,
-                ci_low=ci_low,
-                risk_cap=risk_cap,
-                data_quality=data_quality,
-                decision=decision,
-                stake=stake,
-                reasons=reasons,
-            )
+
+    if decision == "PASS" and not reasons:
+        reasons.append("UNKNOWN_PASS")
 
     return FinalDecision(
         run_id=run_id,
@@ -389,15 +389,16 @@ def finalize_decision(candidate: Candidate, request: AutoRequest, run_id: str) -
         ev_raw=ev_raw,
         ev_calibrated=ev_cal,
         ci_low=ci_low,
-        risk_cap=0.0,
+        risk_cap=risk_cap,
         data_quality=data_quality,
-        decision="PASS",
-        stake=0.0,
-        reasons=reasons or ["UNKNOWN_PASS"],
+        decision=decision,
+        stake=stake,
+        reasons=reasons,
     )
 
 
 def sort_results(results: List[FinalDecision]) -> List[FinalDecision]:
+    dq_rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
     return sorted(
         results,
         key=lambda x: (
@@ -405,7 +406,7 @@ def sort_results(results: List[FinalDecision]) -> List[FinalDecision]:
             x.ev_calibrated,
             x.ci_low,
             x.book_count,
-            2 if x.data_quality == "HIGH" else 1 if x.data_quality == "MEDIUM" else 0,
+            dq_rank.get(x.data_quality, 0),
         ),
         reverse=True,
     )
@@ -414,6 +415,7 @@ def sort_results(results: List[FinalDecision]) -> List[FinalDecision]:
 def fetch_candidates_stub(request: AutoRequest) -> List[Candidate]:
     now = datetime.now(UTC)
     sport = request.sports[0]
+
     return [
         Candidate(
             match="Liberty vs Sun",
@@ -467,50 +469,6 @@ def fetch_candidates_stub(request: AutoRequest) -> List[Candidate]:
             variance="HIGH",
         ),
     ]
-
-
-def run_auto_pipeline(request_text: str, dry_run: bool = False) -> Dict[str, Any]:
-    request = parse_auto_request(request_text, dry_run=dry_run)
-    run_id = uuid.uuid4().hex[:10]
-
-    candidates = fetch_candidates_stub(request)[:request.max_candidates]
-    results = [finalize_decision(c, request, run_id) for c in candidates]
-    results = sort_results(results)
-
-    actionable = [r for r in results if r.decision != "PASS"]
-
-    summary = {
-        "run_id": run_id,
-        "request": asdict(request),
-        "generated_at": datetime.now(UTC).isoformat(),
-        "candidates_count": len(results),
-        "accepted_count": len(actionable),
-        "rejected_count": len(results) - len(actionable),
-        "status": "OK" if results else "NO_CANDIDATES",
-        "message": "NO BETS / ALL PASS" if results and not actionable else "OK",
-        "results": [asdict(r) for r in results],
-    }
-
-    if not dry_run:
-        txt_path = write_txt_report(summary)
-        json_path = write_audit_json(summary)
-        LAST_RUN_PATH.write_text(format_summary_for_telegram(summary), encoding="utf-8")
-        with RUNS_PATH.open("a", encoding="utf-8") as f:
-    line = json.dumps({
-        "run_id": run_id,
-        "generated_at": summary["generated_at"],
-        "request": request_text,
-        "accepted_count": summary["accepted_count"],
-        "rejected_count": summary["rejected_count"],
-        "txt_report": txt_path,
-        "audit_json": json_path,
-    }, ensure_ascii=False)
-    f.write(line + "
-")
-")
-        AUDIT_PATH.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    return summary
 
 
 def write_txt_report(summary: Dict[str, Any]) -> str:
@@ -579,6 +537,53 @@ def format_last_report_text() -> str:
     if LAST_RUN_PATH.exists():
         return LAST_RUN_PATH.read_text(encoding="utf-8")
     return "Пока нет last_run.txt"
+
+
+def run_auto_pipeline(request_text: str, dry_run: bool = False) -> Dict[str, Any]:
+    request = parse_auto_request(request_text, dry_run=dry_run)
+    run_id = uuid.uuid4().hex[:10]
+
+    candidates = fetch_candidates_stub(request)[:request.max_candidates]
+    results = [finalize_decision(c, request, run_id) for c in candidates]
+    results = sort_results(results)
+    actionable = [r for r in results if r.decision != "PASS"]
+
+    summary = {
+        "run_id": run_id,
+        "request": asdict(request),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "candidates_count": len(results),
+        "accepted_count": len(actionable),
+        "rejected_count": len(results) - len(actionable),
+        "status": "OK" if results else "NO_CANDIDATES",
+        "message": "NO BETS / ALL PASS" if results and not actionable else "OK",
+        "results": [asdict(r) for r in results],
+    }
+
+    if not dry_run:
+        txt_path = write_txt_report(summary)
+        json_path = write_audit_json(summary)
+        LAST_RUN_PATH.write_text(format_summary_for_telegram(summary), encoding="utf-8")
+
+        run_line = json.dumps({
+            "run_id": run_id,
+            "generated_at": summary["generated_at"],
+            "request": request_text,
+            "accepted_count": summary["accepted_count"],
+            "rejected_count": summary["rejected_count"],
+            "txt_report": txt_path,
+            "audit_json": json_path,
+        }, ensure_ascii=False)
+
+        with RUNS_PATH.open("a", encoding="utf-8") as f:
+            print(run_line, file=f)
+
+        AUDIT_PATH.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+
+    return summary
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -652,4 +657,8 @@ def main():
     app.add_handler(CommandHandler("audit", audit_cmd))
 
     print("Bot started")
-    app.run_pollin
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
