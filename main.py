@@ -11,7 +11,6 @@ from typing import List, Optional, Dict, Any
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-
 UTC = timezone.utc
 BASE_DIR = Path(__file__).resolve().parent
 REPORTS_DIR = BASE_DIR / "reports"
@@ -134,7 +133,6 @@ def parse_mode(bank: float) -> str:
 
 def parse_auto_request(text: str, dry_run: bool = False) -> AutoRequest:
     clean = text.strip().lower()
-
     strict = "strict" in clean
 
     sports = []
@@ -361,11 +359,9 @@ def finalize_decision(candidate: Candidate, request: AutoRequest, run_id: str) -
             if not reasons:
                 reasons.append("EV_TOO_LOW")
         else:
-            reasons.extend([
-                "EDGE_OK",
-                f"DATA_QUALITY_{data_quality}",
-                f"CLASS_{decision}",
-            ])
+            reasons.append("EDGE_OK")
+            reasons.append("DATA_QUALITY_" + data_quality)
+            reasons.append("CLASS_" + decision)
             risk_cap = calculate_risk_cap(request, decision)
             stake = calculate_stake(request, decision, ev_cal, candidate.odds_best, risk_cap)
 
@@ -473,64 +469,62 @@ def fetch_candidates_stub(request: AutoRequest) -> List[Candidate]:
 
 def write_txt_report(summary: Dict[str, Any]) -> str:
     path = REPORTS_DIR / f"{datetime.now().date()}_{summary['run_id']}_report.txt"
-    req = summary["request"]
 
-    lines = [
-        f"DAILY REPORT | {datetime.now().date()}",
-        f"Request: {req['raw_text']}",
-        f"Mode: {req['mode']}",
-        f"Candidates: {summary['candidates_count']}",
-        f"Accepted: {summary['accepted_count']}",
-        f"Rejected: {summary['rejected_count']}",
-        f"Status: {summary['message']}",
-        "",
-    ]
+    req = summary["request"]
+    lines = []
+    lines.append("DAILY REPORT | " + str(datetime.now().date()))
+    lines.append("Request: " + str(req["raw_text"]))
+    lines.append("Mode: " + str(req["mode"]))
+    lines.append("Candidates: " + str(summary["candidates_count"]))
+    lines.append("Accepted: " + str(summary["accepted_count"]))
+    lines.append("Rejected: " + str(summary["rejected_count"]))
+    lines.append("Status: " + str(summary["message"]))
+    lines.append("")
 
     for i, r in enumerate(summary["results"], start=1):
-        lines.extend([
-            f"{i}) {r['match']}",
-            f"Market: {r['selection']}",
-            f"Best odds: {r['best_odds']} at {r['bookmaker']}",
-            f"Avg odds: {r['avg_odds']} | Book count: {r['book_count']}",
-            f"ModelProb: {r['model_prob']} | Implied: {r['implied_prob']}",
-            f"EV raw: {r['ev_raw']} | EV calibrated: {r['ev_calibrated']} | CI low: {r['ci_low']}",
-            f"Decision: {r['decision']} | Stake: {r['stake']} | Risk cap: {r['risk_cap']}",
-            f"Data quality: {r['data_quality']}",
-            f"Reasons: {', '.join(r['reasons'])}",
-            "",
-        ])
+        lines.append(str(i) + ") " + str(r["match"]))
+        lines.append("Market: " + str(r["selection"]))
+        lines.append("Best odds: " + str(r["best_odds"]) + " at " + str(r["bookmaker"]))
+        lines.append("Avg odds: " + str(r["avg_odds"]) + " | Book count: " + str(r["book_count"]))
+        lines.append("ModelProb: " + str(r["model_prob"]) + " | Implied: " + str(r["implied_prob"]))
+        lines.append("EV raw: " + str(r["ev_raw"]) + " | EV calibrated: " + str(r["ev_calibrated"]) + " | CI low: " + str(r["ci_low"]))
+        lines.append("Decision: " + str(r["decision"]) + " | Stake: " + str(r["stake"]) + " | Risk cap: " + str(r["risk_cap"]))
+        lines.append("Data quality: " + str(r["data_quality"]))
+        lines.append("Reasons: " + ", ".join(r["reasons"]))
+        lines.append("")
 
-    path.write_text("
-".join(lines), encoding="utf-8")
+    with path.open("w", encoding="utf-8") as f:
+        for item in lines:
+            print(item, file=f)
+
     return str(path)
 
 
 def write_audit_json(summary: Dict[str, Any]) -> str:
     path = LOGS_DIR / f"{datetime.now().date()}_{summary['run_id']}_audit.json"
-    path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
     return str(path)
 
 
 def format_summary_for_telegram(summary: Dict[str, Any]) -> str:
-    lines = [
-        f"Run: {summary['run_id']}",
-        f"Status: {summary['message']}",
-        f"Candidates: {summary['candidates_count']}",
-        f"Accepted: {summary['accepted_count']}",
-        f"Rejected: {summary['rejected_count']}",
-        "",
-    ]
+    lines = []
+    lines.append("Run: " + str(summary["run_id"]))
+    lines.append("Status: " + str(summary["message"]))
+    lines.append("Candidates: " + str(summary["candidates_count"]))
+    lines.append("Accepted: " + str(summary["accepted_count"]))
+    lines.append("Rejected: " + str(summary["rejected_count"]))
+    lines.append("")
 
     for r in summary["results"][:5]:
         if r["decision"] == "PASS":
-            lines.append(f"PASS | {r['match']} | {', '.join(r['reasons'])}")
+            lines.append("PASS | " + str(r["match"]) + " | " + ", ".join(r["reasons"]))
         else:
             lines.append(
-                f"{r['decision']} | {r['match']} | stake {r['stake']} | EV {r['ev_calibrated']} | CI {r['ci_low']}"
+                str(r["decision"]) + " | " + str(r["match"]) + " | stake " + str(r["stake"]) + " | EV " + str(r["ev_calibrated"]) + " | CI " + str(r["ci_low"])
             )
 
-    return "
-".join(lines)
+    return os.linesep.join(lines)
 
 
 def format_last_report_text() -> str:
@@ -578,55 +572,45 @@ def run_auto_pipeline(request_text: str, dry_run: bool = False) -> Dict[str, Any
         with RUNS_PATH.open("a", encoding="utf-8") as f:
             print(run_line, file=f)
 
-        AUDIT_PATH.write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        with AUDIT_PATH.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
 
     return summary
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "Бот запущен.
-"
-        "Команды:
-"
-        "/auto today basketball strict
-"
-        "/dryrun today basketball strict
-"
-        "/report
-"
-        "/audit"
-    )
+    text = "Бот запущен.
+Команды:
+/auto today basketball strict
+/dryrun today basketball strict
+/report
+/audit"
     await update.message.reply_text(text)
 
 
 async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = " ".join(context.args).strip()
-    request_text = f"AUTO {args}" if args else "AUTO today basketball strict"
+    request_text = "AUTO " + args if args else "AUTO today basketball strict"
 
     try:
         summary = run_auto_pipeline(request_text, dry_run=False)
         await update.message.reply_text(format_summary_for_telegram(summary))
     except Exception as e:
-        await update.message.reply_text(f"ERROR_REPORT
-{type(e).__name__}: {e}")
+        await update.message.reply_text("ERROR_REPORT
+" + type(e).__name__ + ": " + str(e))
 
 
 async def dryrun_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = " ".join(context.args).strip()
-    request_text = f"AUTO {args}" if args else "AUTO today basketball strict"
+    request_text = "AUTO " + args if args else "AUTO today basketball strict"
 
     try:
         summary = run_auto_pipeline(request_text, dry_run=True)
-        text = "[DRYRUN]
-" + format_summary_for_telegram(summary)
+        text = "[DRYRUN]" + os.linesep + format_summary_for_telegram(summary)
         await update.message.reply_text(text)
     except Exception as e:
-        await update.message.reply_text(f"ERROR_REPORT
-{type(e).__name__}: {e}")
+        await update.message.reply_text("ERROR_REPORT
+" + type(e).__name__ + ": " + str(e))
 
 
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -637,8 +621,7 @@ async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if AUDIT_PATH.exists():
         raw = AUDIT_PATH.read_text(encoding="utf-8")
         if len(raw) > 3500:
-            raw = raw[:3500] + "
-...truncated..."
+            raw = raw[:3500] + "...truncated..."
         await update.message.reply_text(raw)
     else:
         await update.message.reply_text("Пока нет audit.json")
