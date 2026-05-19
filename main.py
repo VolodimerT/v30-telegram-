@@ -6,8 +6,9 @@ import uuid
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
+import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -164,6 +165,7 @@ def calc_ev_raw(model_prob: float, odds: float) -> float:
 
 def calc_data_quality(candidate: Candidate) -> str:
     score = 0
+
     if candidate.book_count >= 5:
         score += 2
     elif candidate.book_count >= 3:
@@ -285,6 +287,57 @@ def calculate_stake(request: AutoRequest, decision_class: str, ev_calibrated: fl
     return float(max(rounded, 0))
 
 
+def map_sport_keys(sports: List[str]) -> List[Tuple[str, str]]:
+    mapping = {
+        "basketball": [("basketball", "basketball_nba")],
+        "football": [("football", "soccer_spain_la_liga")],
+        "wnba": [("wnba", "basketball_wnba")],
+        "euroleague": [("euroleague", "basketball_euroleague")],
+        "acb": [("acb", "basketball_spain_acb")],
+        "laliga": [("laliga", "soccer_spain_la_liga")],
+    }
+
+    out = []
+    for sport in sports:
+        out.extend(mapping.get(sport, []))
+    return out
+
+
+def safe_float(value, default=None):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def estimate_model_prob(best_odds: float, avg_odds: float, book_count: int) -> float:
+    implied_best = 100.0 / best_odds
+    edge_bonus = min(max((best_odds - avg_odds) * 12.0, 0.0), 4.5)
+    consensus_bonus = 1.5 if book_count >= 5 else 0.75 if book_count >= 3 else 0.0
+    model_prob = implied_best + edge_bonus + consensus_bonus
+    return round(min(max(model_prob, 35.0), 75.0), 2)
+
+
+def infer_variance(market: str, odds: float) -> str:
+    if odds >= 3.2:
+        return "EXTREME"
+    if odds >= 2.4:
+        return "HIGH"
+    if market == "totals":
+        return "MEDIUM"
+    return "LOW"
+
+
+def normalize_market_key(market_key: str) -> str:
+    if market_key == "h2h":
+        return "h2h"
+    if market_key == "spreads":
+        return "spreads"
+    if market_key == "totals":
+        return "totals"
+    return market_key
+
+
 def finalize_decision(candidate: Candidate, request: AutoRequest, run_id: str) -> FinalDecision:
     now = datetime.now(UTC)
     reasons: List[str] = []
@@ -379,63 +432,137 @@ def sort_results(results: List[FinalDecision]) -> List[FinalDecision]:
     )
 
 
-def fetch_candidates_stub(request: AutoRequest) -> List[Candidate]:
-    now = datetime.now(UTC)
-    sport = request.sports[0]
+def fetch_candidates(request: AutoRequest) -> List[Candidate]:
+    api_key = os.getenv("ODDS_API_KEY")
+    if not api_key:
+        raise RuntimeError("ODDS_API_KEY is not set")
 
-    return [
-        Candidate(
-            match="Liberty vs Sun",
-            sport=sport,
-            market="spreads",
-            selection="Liberty -4.5",
-            point=-4.5,
-            commence_time=now + timedelta(hours=5),
-            odds_best=1.91,
-            odds_avg=1.84,
-            book_count=6,
-            model_prob=56.2,
-            lineup_confirmed=True,
-            injury_fresh_hours=1.0,
-            odds_age_minutes=20,
-            source_tier=2,
-            variance="MEDIUM",
-        ),
-        Candidate(
-            match="Aces vs Storm",
-            sport=sport,
-            market="totals",
-            selection="Over 167.5",
-            point=167.5,
-            commence_time=now + timedelta(hours=2),
-            odds_best=1.87,
-            odds_avg=1.83,
-            book_count=4,
-            model_prob=54.0,
-            lineup_confirmed=False,
-            injury_fresh_hours=2.0,
-            odds_age_minutes=35,
-            source_tier=2,
-            variance="MEDIUM",
-        ),
-        Candidate(
-            match="Wings vs Fever",
-            sport=sport,
-            market="h2h",
-            selection="Fever ML",
-            point=None,
-            commence_time=now + timedelta(minutes=8),
-            odds_best=2.05,
-            odds_avg=1.98,
-            book_count=5,
-            model_prob=51.5,
-            lineup_confirmed=True,
-            injury_fresh_hours=1.0,
-            odds_age_minutes=15,
-            source_tier=2,
-            variance="HIGH",
-        ),
-    ]
+    sport_pairs = map_sport_keys(request.sports)
+    if not sport_pairs:
+        return []
+
+    all_candidates: List[Candidate] = []
+    now = datetime.now(UTC)
+
+    for sport_alias, sport_key in sport_pairs:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+        params = {
+            "apiKey": api_key,
+            "regions": "eu,uk",
+            "markets": ",".join(request.markets),
+            "oddsFormat": "decimal",
+            "dateFormat": "iso",
+        }
+
+        response = requests.get(url, params=params, timeout=25)
+        response.raise_for_status()
+        events = response.json()
+
+        for event in events:
+            home_team = event.get("home_team")
+            away_team = event.get("away_team")
+            commence_raw = event.get("commence_time")
+            event_id = event.get("id", "")
+
+            if not home_team or not away_team or not commence_raw:
+                continue
+
+            try:
+                commence_time = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
+            except Exception:
+                continue
+
+            grouped: Dict[str, Dict[str, Any]] = {}
+
+            for bookmaker in event.get("bookmakers", []):
+                bookmaker_title = bookmaker.get("title", "Book")
+                last_update_raw = bookmaker.get("last_update")
+                odds_age_minutes = 999.0
+
+                if last_update_raw:
+                    try:
+                        last_update = datetime.fromisoformat(last_update_raw.replace("Z", "+00:00"))
+                        odds_age_minutes = max((now - last_update).total_seconds() / 60.0, 0.0)
+                    except Exception:
+                        odds_age_minutes = 999.0
+
+                for market in bookmaker.get("markets", []):
+                    market_key = normalize_market_key(market.get("key", ""))
+                    if market_key not in request.markets:
+                        continue
+
+                    for outcome in market.get("outcomes", []):
+                        name = outcome.get("name")
+                        price = safe_float(outcome.get("price"))
+                        point = safe_float(outcome.get("point"))
+
+                        if not name or not price:
+                            continue
+
+                        group_key = "|".join([str(event_id), market_key, str(name), str(point)])
+
+                        if group_key not in grouped:
+                            grouped[group_key] = {
+                                "match": str(away_team) + " vs " + str(home_team),
+                                "sport": sport_alias,
+                                "market": market_key,
+                                "selection": str(name) if point is None else str(name) + " " + str(point),
+                                "point": point,
+                                "commence_time": commence_time,
+                                "prices": [],
+                                "best_odds": price,
+                                "best_bookmaker": bookmaker_title,
+                                "best_odds_age_minutes": odds_age_minutes,
+                            }
+
+                        grouped[group_key]["prices"].append(price)
+
+                        if price > grouped[group_key]["best_odds"]:
+                            grouped[group_key]["best_odds"] = price
+                            grouped[group_key]["best_bookmaker"] = bookmaker_title
+                            grouped[group_key]["best_odds_age_minutes"] = odds_age_minutes
+
+            for item in grouped.values():
+                prices = item["prices"]
+                if not prices:
+                    continue
+
+                best_odds = round(max(prices), 2)
+                avg_odds = round(sum(prices) / len(prices), 2)
+                book_count = len(prices)
+                model_prob = estimate_model_prob(best_odds, avg_odds, book_count)
+
+                market = item["market"]
+                variance = infer_variance(market, best_odds)
+
+                lineup_confirmed = True
+                if market in ("spreads", "totals"):
+                    hours_to_start = (item["commence_time"] - now).total_seconds() / 3600.0
+                    lineup_confirmed = hours_to_start > 1.5
+
+                source_tier = DEFAULT_CONFIG["sport_tiers"].get(sport_alias, {}).get("tier", 2)
+
+                candidate = Candidate(
+                    match=item["match"],
+                    sport=sport_alias,
+                    market=market,
+                    selection=item["selection"],
+                    point=item["point"],
+                    commence_time=item["commence_time"],
+                    odds_best=best_odds,
+                    odds_avg=avg_odds,
+                    book_count=book_count,
+                    model_prob=model_prob,
+                    lineup_confirmed=lineup_confirmed,
+                    injury_fresh_hours=2.0,
+                    odds_age_minutes=round(item["best_odds_age_minutes"], 2),
+                    source_tier=source_tier,
+                    variance=variance,
+                    bookmaker=item["best_bookmaker"],
+                )
+                all_candidates.append(candidate)
+
+    return all_candidates[:request.max_candidates]
 
 
 def write_txt_report(summary: Dict[str, Any]) -> str:
@@ -454,6 +581,7 @@ def write_txt_report(summary: Dict[str, Any]) -> str:
 
         for i, r in enumerate(summary["results"], start=1):
             print(str(i) + ") " + str(r["match"]), file=f)
+            print("Sport: " + str(r["sport"]), file=f)
             print("Market: " + str(r["selection"]), file=f)
             print("Best odds: " + str(r["best_odds"]) + " at " + str(r["bookmaker"]), file=f)
             print("Avg odds: " + str(r["avg_odds"]) + " | Book count: " + str(r["book_count"]), file=f)
@@ -469,142 +597,4 @@ def write_txt_report(summary: Dict[str, Any]) -> str:
 
 def write_audit_json(summary: Dict[str, Any]) -> str:
     path = LOGS_DIR / f"{datetime.now().date()}_{summary['run_id']}_audit.json"
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-    return str(path)
-
-
-def format_summary_for_telegram(summary: Dict[str, Any]) -> str:
-    lines = []
-    lines.append("Run: " + str(summary["run_id"]))
-    lines.append("Status: " + str(summary["message"]))
-    lines.append("Candidates: " + str(summary["candidates_count"]))
-    lines.append("Accepted: " + str(summary["accepted_count"]))
-    lines.append("Rejected: " + str(summary["rejected_count"]))
-    lines.append("")
-
-    for r in summary["results"][:5]:
-        if r["decision"] == "PASS":
-            lines.append("PASS | " + str(r["match"]) + " | " + ", ".join(r["reasons"]))
-        else:
-            lines.append(str(r["decision"]) + " | " + str(r["match"]) + " | stake " + str(r["stake"]) + " | EV " + str(r["ev_calibrated"]) + " | CI " + str(r["ci_low"]))
-
-    return os.linesep.join(lines)
-
-
-def format_last_report_text() -> str:
-    if LAST_RUN_PATH.exists():
-        return LAST_RUN_PATH.read_text(encoding="utf-8")
-    return "Пока нет last_run.txt"
-
-
-def run_auto_pipeline(request_text: str, dry_run: bool = False) -> Dict[str, Any]:
-    request = parse_auto_request(request_text, dry_run=dry_run)
-    run_id = uuid.uuid4().hex[:10]
-
-    candidates = fetch_candidates_stub(request)[:request.max_candidates]
-    results = [finalize_decision(c, request, run_id) for c in candidates]
-    results = sort_results(results)
-    actionable = [r for r in results if r.decision != "PASS"]
-
-    summary = {
-        "run_id": run_id,
-        "request": asdict(request),
-        "generated_at": datetime.now(UTC).isoformat(),
-        "candidates_count": len(results),
-        "accepted_count": len(actionable),
-        "rejected_count": len(results) - len(actionable),
-        "status": "OK" if results else "NO_CANDIDATES",
-        "message": "NO BETS / ALL PASS" if results and not actionable else "OK",
-        "results": [asdict(r) for r in results],
-    }
-
-    if not dry_run:
-        txt_path = write_txt_report(summary)
-        json_path = write_audit_json(summary)
-        LAST_RUN_PATH.write_text(format_summary_for_telegram(summary), encoding="utf-8")
-
-        run_line = json.dumps({
-            "run_id": run_id,
-            "generated_at": summary["generated_at"],
-            "request": request_text,
-            "accepted_count": summary["accepted_count"],
-            "rejected_count": summary["rejected_count"],
-            "txt_report": txt_path,
-            "audit_json": json_path,
-        }, ensure_ascii=False)
-
-        with RUNS_PATH.open("a", encoding="utf-8") as f:
-            print(run_line, file=f)
-
-        with AUDIT_PATH.open("w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
-
-    return summary
-
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Бот запущен. Команды: /auto today basketball strict | /dryrun today basketball strict | /report | /audit"
-    await update.message.reply_text(text)
-
-
-async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = " ".join(context.args).strip()
-    if args:
-        request_text = "AUTO " + args
-    else:
-        request_text = "AUTO today basketball strict"
-
-    try:
-        summary = run_auto_pipeline(request_text, dry_run=False)
-        await update.message.reply_text(format_summary_for_telegram(summary))
-    except Exception as e:
-        await update.message.reply_text("ERROR_REPORT: " + type(e).__name__ + ": " + str(e))
-
-
-async def dryrun_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = " ".join(context.args).strip()
-    if args:
-        request_text = "AUTO " + args
-    else:
-        request_text = "AUTO today basketball strict"
-
-    try:
-        summary = run_auto_pipeline(request_text, dry_run=True)
-        await update.message.reply_text("[DRYRUN] " + format_summary_for_telegram(summary))
-    except Exception as e:
-        await update.message.reply_text("ERROR_REPORT: " + type(e).__name__ + ": " + str(e))
-
-
-async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(format_last_report_text())
-
-
-async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if AUDIT_PATH.exists():
-        raw = AUDIT_PATH.read_text(encoding="utf-8")
-        if len(raw) > 3500:
-            raw = raw[:3500] + "...truncated..."
-        await update.message.reply_text(raw)
-    else:
-        await update.message.reply_text("Пока нет audit.json")
-
-
-def main():
-    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN or BOT_TOKEN is not set")
-
-    app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("auto", auto_cmd))
-    app.add_handler(CommandHandler("dryrun", dryrun_cmd))
-    app.add_handler(CommandHandler("report", report_cmd))
-    app.add_handler(CommandHandler("audit", audit_cmd))
-
-    print("Bot started")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+    with path.open("w",
