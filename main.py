@@ -23,30 +23,10 @@ CLASS_ORDER = {"CORE": 4, "SUPPORT": 3, "MICRO": 2, "PASS": 1}
 DEFAULT_CONFIG = {
     "unit": 10,
     "mode_rules": {
-        "FROZEN": {
-            "min_ev_calibrated": 6.0,
-            "max_micro_stake": 10,
-            "max_support_stake": 20,
-            "max_core_stake": 30,
-        },
-        "EMERGENCY": {
-            "min_ev_calibrated": 8.0,
-            "max_micro_stake": 10,
-            "max_support_stake": 15,
-            "max_core_stake": 20,
-        },
-        "NORMAL": {
-            "min_ev_calibrated": 4.0,
-            "max_micro_stake": 20,
-            "max_support_stake": 35,
-            "max_core_stake": 50,
-        },
-        "GROWTH": {
-            "min_ev_calibrated": 3.0,
-            "max_micro_stake": 25,
-            "max_support_stake": 40,
-            "max_core_stake": 60,
-        },
+        "FROZEN": {"min_ev_calibrated": 6.0, "max_micro_stake": 10, "max_support_stake": 20, "max_core_stake": 30},
+        "EMERGENCY": {"min_ev_calibrated": 8.0, "max_micro_stake": 10, "max_support_stake": 15, "max_core_stake": 20},
+        "NORMAL": {"min_ev_calibrated": 4.0, "max_micro_stake": 20, "max_support_stake": 35, "max_core_stake": 50},
+        "GROWTH": {"min_ev_calibrated": 3.0, "max_micro_stake": 25, "max_support_stake": 40, "max_core_stake": 60},
     },
     "sport_tiers": {
         "basketball": {"tier": 2, "max_class": "CORE"},
@@ -142,8 +122,6 @@ def parse_auto_request(text: str, dry_run: bool = False) -> AutoRequest:
     if not sports:
         sports = ["basketball"]
 
-    markets = ["h2h", "spreads", "totals"]
-
     max_candidates = 12
     m = re.search(r"max(?:_candidates)?[=s](d+)", clean)
     if m:
@@ -167,7 +145,7 @@ def parse_auto_request(text: str, dry_run: bool = False) -> AutoRequest:
         raw_text=text,
         date=date,
         sports=sports,
-        markets=markets,
+        markets=["h2h", "spreads", "totals"],
         strict=strict,
         bank=bank,
         mode=mode,
@@ -186,7 +164,6 @@ def calc_ev_raw(model_prob: float, odds: float) -> float:
 
 def calc_data_quality(candidate: Candidate) -> str:
     score = 0
-
     if candidate.book_count >= 5:
         score += 2
     elif candidate.book_count >= 3:
@@ -219,7 +196,6 @@ def calc_data_quality(candidate: Candidate) -> str:
 
 def calibration_factor(candidate: Candidate, data_quality: str) -> float:
     factor = 1.0
-
     if candidate.book_count < 3:
         factor -= 0.25
     if candidate.odds_age_minutes > 120:
@@ -230,13 +206,11 @@ def calibration_factor(candidate: Candidate, data_quality: str) -> float:
         factor -= 0.15
     if data_quality == "LOW":
         factor -= 0.10
-
     return max(0.25, round(factor, 2))
 
 
 def calc_ci_low(ev_calibrated: float, candidate: Candidate, data_quality: str) -> float:
     penalty = 0.0
-
     if candidate.book_count < 3:
         penalty += 5.0
     if candidate.odds_age_minutes > 120:
@@ -247,7 +221,6 @@ def calc_ci_low(ev_calibrated: float, candidate: Candidate, data_quality: str) -
         penalty += 5.0
     if data_quality == "LOW":
         penalty += 3.0
-
     return round(ev_calibrated - penalty, 2)
 
 
@@ -285,7 +258,6 @@ def apply_class_caps(base_class: str, candidate: Candidate, request: AutoRequest
 
 def calculate_risk_cap(request: AutoRequest, decision_class: str) -> float:
     rules = DEFAULT_CONFIG["mode_rules"][request.mode]
-
     if decision_class == "MICRO":
         return rules["max_micro_stake"]
     if decision_class == "SUPPORT":
@@ -308,7 +280,6 @@ def calculate_stake(request: AutoRequest, decision_class: str, ev_calibrated: fl
 
     unit = DEFAULT_CONFIG["unit"]
     rounded = math.floor(stake / unit) * unit
-
     if rounded == 0 and stake > 0:
         return float(unit)
     return float(max(rounded, 0))
@@ -469,33 +440,29 @@ def fetch_candidates_stub(request: AutoRequest) -> List[Candidate]:
 
 def write_txt_report(summary: Dict[str, Any]) -> str:
     path = REPORTS_DIR / f"{datetime.now().date()}_{summary['run_id']}_report.txt"
-
     req = summary["request"]
-    lines = []
-    lines.append("DAILY REPORT | " + str(datetime.now().date()))
-    lines.append("Request: " + str(req["raw_text"]))
-    lines.append("Mode: " + str(req["mode"]))
-    lines.append("Candidates: " + str(summary["candidates_count"]))
-    lines.append("Accepted: " + str(summary["accepted_count"]))
-    lines.append("Rejected: " + str(summary["rejected_count"]))
-    lines.append("Status: " + str(summary["message"]))
-    lines.append("")
-
-    for i, r in enumerate(summary["results"], start=1):
-        lines.append(str(i) + ") " + str(r["match"]))
-        lines.append("Market: " + str(r["selection"]))
-        lines.append("Best odds: " + str(r["best_odds"]) + " at " + str(r["bookmaker"]))
-        lines.append("Avg odds: " + str(r["avg_odds"]) + " | Book count: " + str(r["book_count"]))
-        lines.append("ModelProb: " + str(r["model_prob"]) + " | Implied: " + str(r["implied_prob"]))
-        lines.append("EV raw: " + str(r["ev_raw"]) + " | EV calibrated: " + str(r["ev_calibrated"]) + " | CI low: " + str(r["ci_low"]))
-        lines.append("Decision: " + str(r["decision"]) + " | Stake: " + str(r["stake"]) + " | Risk cap: " + str(r["risk_cap"]))
-        lines.append("Data quality: " + str(r["data_quality"]))
-        lines.append("Reasons: " + ", ".join(r["reasons"]))
-        lines.append("")
 
     with path.open("w", encoding="utf-8") as f:
-        for item in lines:
-            print(item, file=f)
+        print("DAILY REPORT | " + str(datetime.now().date()), file=f)
+        print("Request: " + str(req["raw_text"]), file=f)
+        print("Mode: " + str(req["mode"]), file=f)
+        print("Candidates: " + str(summary["candidates_count"]), file=f)
+        print("Accepted: " + str(summary["accepted_count"]), file=f)
+        print("Rejected: " + str(summary["rejected_count"]), file=f)
+        print("Status: " + str(summary["message"]), file=f)
+        print("", file=f)
+
+        for i, r in enumerate(summary["results"], start=1):
+            print(str(i) + ") " + str(r["match"]), file=f)
+            print("Market: " + str(r["selection"]), file=f)
+            print("Best odds: " + str(r["best_odds"]) + " at " + str(r["bookmaker"]), file=f)
+            print("Avg odds: " + str(r["avg_odds"]) + " | Book count: " + str(r["book_count"]), file=f)
+            print("ModelProb: " + str(r["model_prob"]) + " | Implied: " + str(r["implied_prob"]), file=f)
+            print("EV raw: " + str(r["ev_raw"]) + " | EV calibrated: " + str(r["ev_calibrated"]) + " | CI low: " + str(r["ci_low"]), file=f)
+            print("Decision: " + str(r["decision"]) + " | Stake: " + str(r["stake"]) + " | Risk cap: " + str(r["risk_cap"]), file=f)
+            print("Data quality: " + str(r["data_quality"]), file=f)
+            print("Reasons: " + ", ".join(r["reasons"]), file=f)
+            print("", file=f)
 
     return str(path)
 
@@ -520,9 +487,7 @@ def format_summary_for_telegram(summary: Dict[str, Any]) -> str:
         if r["decision"] == "PASS":
             lines.append("PASS | " + str(r["match"]) + " | " + ", ".join(r["reasons"]))
         else:
-            lines.append(
-                str(r["decision"]) + " | " + str(r["match"]) + " | stake " + str(r["stake"]) + " | EV " + str(r["ev_calibrated"]) + " | CI " + str(r["ci_low"])
-            )
+            lines.append(str(r["decision"]) + " | " + str(r["match"]) + " | stake " + str(r["stake"]) + " | EV " + str(r["ev_calibrated"]) + " | CI " + str(r["ci_low"]))
 
     return os.linesep.join(lines)
 
@@ -579,38 +544,36 @@ def run_auto_pipeline(request_text: str, dry_run: bool = False) -> Dict[str, Any
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Бот запущен.
-Команды:
-/auto today basketball strict
-/dryrun today basketball strict
-/report
-/audit"
+    text = "Бот запущен. Команды: /auto today basketball strict | /dryrun today basketball strict | /report | /audit"
     await update.message.reply_text(text)
 
 
 async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = " ".join(context.args).strip()
-    request_text = "AUTO " + args if args else "AUTO today basketball strict"
+    if args:
+        request_text = "AUTO " + args
+    else:
+        request_text = "AUTO today basketball strict"
 
     try:
         summary = run_auto_pipeline(request_text, dry_run=False)
         await update.message.reply_text(format_summary_for_telegram(summary))
     except Exception as e:
-        await update.message.reply_text("ERROR_REPORT
-" + type(e).__name__ + ": " + str(e))
+        await update.message.reply_text("ERROR_REPORT: " + type(e).__name__ + ": " + str(e))
 
 
 async def dryrun_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = " ".join(context.args).strip()
-    request_text = "AUTO " + args if args else "AUTO today basketball strict"
+    if args:
+        request_text = "AUTO " + args
+    else:
+        request_text = "AUTO today basketball strict"
 
     try:
         summary = run_auto_pipeline(request_text, dry_run=True)
-        text = "[DRYRUN]" + os.linesep + format_summary_for_telegram(summary)
-        await update.message.reply_text(text)
+        await update.message.reply_text("[DRYRUN] " + format_summary_for_telegram(summary))
     except Exception as e:
-        await update.message.reply_text("ERROR_REPORT
-" + type(e).__name__ + ": " + str(e))
+        await update.message.reply_text("ERROR_REPORT: " + type(e).__name__ + ": " + str(e))
 
 
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
