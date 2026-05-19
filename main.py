@@ -1,455 +1,653 @@
 import os
+import re
 import json
+import math
+import uuid
+from dataclasses import dataclass, asdict, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-LAST_RUN = "No runs yet"
-RUNS = []
-
-LAST_RUN_FILE = "last_run.txt"
-RUNS_FILE = "runs.txt"
-AUDIT_FILE = "audit.json"
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 
-def parse_params(args):
-    params = {}
-    for part in args:
-        if "=" in part:
-            key, value = part.split("=", 1)
-            params[key.upper()] = value
-    return params
+UTC = timezone.utc
+BASE_DIR = Path(__file__).resolve().parent
+REPORTS_DIR = BASE_DIR / "reports"
+LOGS_DIR = BASE_DIR / "logs"
+REPORTS_DIR.mkdir(exist_ok=True)
+LOGS_DIR.mkdir(exist_ok=True)
+
+CLASS_ORDER = {"CORE": 4, "SUPPORT": 3, "MICRO": 2, "PASS": 1}
+
+DEFAULT_CONFIG = {
+    "unit": 10,
+    "mode_rules": {
+        "FROZEN": {
+            "min_ev_calibrated": 6.0,
+            "max_micro_stake": 10,
+            "max_support_stake": 20,
+            "max_core_stake": 30,
+        },
+        "EMERGENCY": {
+            "min_ev_calibrated": 8.0,
+            "max_micro_stake": 10,
+            "max_support_stake": 15,
+            "max_core_stake": 20,
+        },
+        "NORMAL": {
+            "min_ev_calibrated": 4.0,
+            "max_micro_stake": 20,
+            "max_support_stake": 35,
+            "max_core_stake": 50,
+        },
+        "GROWTH": {
+            "min_ev_calibrated": 3.0,
+            "max_micro_stake": 25,
+            "max_support_stake": 40,
+            "max_core_stake": 60,
+        },
+    },
+    "sport_tiers": {
+        "basketball": {"tier": 2, "max_class": "CORE"},
+        "football": {"tier": 2, "max_class": "CORE"},
+        "wnba": {"tier": 3, "max_class": "MICRO"},
+    },
+}
 
 
-def to_float(value, default_value):
-    try:
-        return float(value)
-    except:
-        return default_value
+@dataclass
+class AutoRequest:
+    raw_text: str
+    date: str = "today"
+    sports: List[str] = field(default_factory=list)
+    markets: List[str] = field(default_factory=lambda: ["h2h", "spreads", "totals"])
+    strict: bool = False
+    bank: float = 1000.0
+    mode: str = "NORMAL"
+    max_candidates: int = 12
+    dry_run: bool = False
 
 
-def to_int(value, default_value):
-    try:
-        return int(float(value))
-    except:
-        return default_value
+@dataclass
+class Candidate:
+    match: str
+    sport: str
+    market: str
+    selection: str
+    point: Optional[float]
+    commence_time: datetime
+    odds_best: float
+    odds_avg: float
+    book_count: int
+    model_prob: float
+    lineup_confirmed: bool
+    injury_fresh_hours: float
+    odds_age_minutes: float
+    source_tier: int
+    variance: str
+    bookmaker: str = "BestBook"
 
 
-def normalize_mode(value):
-    v = str(value).lower()
-    if v == "emergency":
-        return "emergency"
-    return "normal"
+@dataclass
+class FinalDecision:
+    run_id: str
+    generated_at: str
+    match: str
+    sport: str
+    market: str
+    selection: str
+    point: Optional[float]
+    best_odds: float
+    avg_odds: float
+    bookmaker: str
+    book_count: int
+    model_prob: float
+    implied_prob: float
+    ev_raw: float
+    ev_calibrated: float
+    ci_low: float
+    risk_cap: float
+    data_quality: str
+    decision: str
+    stake: float
+    reasons: List[str]
 
 
-def normalize_strict(value):
-    v = str(value).lower()
-    if v in ["1", "true", "yes", "on"]:
-        return 1
-    return 0
+LAST_RUN_PATH = BASE_DIR / "last_run.txt"
+RUNS_PATH = BASE_DIR / "runs.txt"
+AUDIT_PATH = BASE_DIR / "audit.json"
 
 
-def normalize_data(value):
-    v = str(value).lower()
-    if v in ["good", "ok", "fresh"]:
-        return "good"
-    if v in ["bad", "stale", "poor"]:
-        return "bad"
-    return "unknown"
+def parse_mode(bank: float) -> str:
+    if bank < 500:
+        return "FROZEN"
+    if bank < 1000:
+        return "EMERGENCY"
+    if bank < 3000:
+        return "NORMAL"
+    return "GROWTH"
 
 
-def normalize_lineup(value):
-    v = str(value).lower()
-    if v in ["yes", "true", "1", "confirmed"]:
-        return "yes"
-    return "no"
+def parse_auto_request(text: str, dry_run: bool = False) -> AutoRequest:
+    clean = text.strip().lower()
+
+    strict = "strict" in clean
+    sports = []
+    for token in ["basketball", "football", "wnba", "euroleague", "acb", "laliga"]:
+        if token in clean:
+            sports.append(token)
+    if not sports:
+        sports = ["basketball"]
+
+    markets = ["h2h", "spreads", "totals"]
+    max_candidates = 12
+    m = re.search(r"max(?:_candidates)?[=s](d+)", clean)
+    if m:
+        max_candidates = int(m.group(1))
+
+    bank = 1000.0
+    b = re.search(r"bank[=s](d+(?:.d+)?)", clean)
+    if b:
+        bank = float(b.group(1))
+
+    mode = parse_mode(bank)
+    mm = re.search(r"mode[=s](frozen|emergency|normal|growth)", clean)
+    if mm:
+        mode = mm.group(1).upper()
+
+    date = "today"
+    if "tomorrow" in clean:
+        date = "tomorrow"
+
+    return AutoRequest(
+        raw_text=text,
+        date=date,
+        sports=sports,
+        markets=markets,
+        strict=strict,
+        bank=bank,
+        mode=mode,
+        max_candidates=max_candidates,
+        dry_run=dry_run,
+    )
 
 
-def normalize_sport(value):
-    v = str(value).lower()
-    if v in ["football", "basketball", "hockey", "tennis"]:
-        return v
-    return "unknown"
+def implied_probability(odds: float) -> float:
+    return round(100.0 / odds, 2)
 
 
-def lower_class(bet_class):
-    if bet_class == "CORE":
-        return "SUPPORT"
-    if bet_class == "SUPPORT":
-        return "MICRO"
-    if bet_class == "MICRO":
+def calc_ev_raw(model_prob: float, odds: float) -> float:
+    return round(model_prob - implied_probability(odds), 2)
+
+
+def calc_data_quality(candidate: Candidate) -> str:
+    score = 0
+    if candidate.book_count >= 5:
+        score += 2
+    elif candidate.book_count >= 3:
+        score += 1
+
+    if candidate.odds_age_minutes <= 30:
+        score += 2
+    elif candidate.odds_age_minutes <= 120:
+        score += 1
+
+    if candidate.injury_fresh_hours <= 2:
+        score += 2
+    elif candidate.injury_fresh_hours <= 4:
+        score += 1
+
+    if candidate.lineup_confirmed:
+        score += 1
+
+    if candidate.source_tier == 1:
+        score += 2
+    elif candidate.source_tier == 2:
+        score += 1
+
+    if score >= 7:
+        return "HIGH"
+    if score >= 4:
+        return "MEDIUM"
+    return "LOW"
+
+
+def calibration_factor(candidate: Candidate, data_quality: str) -> float:
+    factor = 1.0
+    if candidate.book_count < 3:
+        factor -= 0.25
+    if candidate.odds_age_minutes > 120:
+        factor -= 0.20
+    if candidate.injury_fresh_hours > 4:
+        factor -= 0.20
+    if not candidate.lineup_confirmed and candidate.market in ("spreads", "totals"):
+        factor -= 0.15
+    if data_quality == "LOW":
+        factor -= 0.10
+    return max(0.25, round(factor, 2))
+
+
+def calc_ci_low(ev_calibrated: float, candidate: Candidate, data_quality: str) -> float:
+    penalty = 0.0
+    if candidate.book_count < 3:
+        penalty += 5.0
+    if candidate.odds_age_minutes > 120:
+        penalty += 4.0
+    if candidate.injury_fresh_hours > 4:
+        penalty += 4.0
+    if candidate.variance in ("HIGH", "EXTREME"):
+        penalty += 5.0
+    if data_quality == "LOW":
+        penalty += 3.0
+    return round(ev_calibrated - penalty, 2)
+
+
+def class_from_ev(ev_calibrated: float, ci_low: float, data_quality: str) -> str:
+    if ci_low < 0:
         return "PASS"
+    if ev_calibrated >= 10 and ci_low >= 3 and data_quality == "HIGH":
+        return "CORE"
+    if ev_calibrated >= 7 and ci_low >= 1:
+        return "SUPPORT"
+    if ev_calibrated >= 4 and ci_low >= 0:
+        return "MICRO"
     return "PASS"
 
 
-def decide(odds, bank, mode, strict_flag, ev, books, data_quality, mins_to_start, lineup, sport):
-    if mins_to_start <= 0:
-        return "PASS", 0.0, "EXPIRED_EVENT"
+def apply_class_caps(base_class: str, candidate: Candidate, request: AutoRequest) -> str:
+    capped = base_class
 
-    if mins_to_start < 10:
-        return "PASS", 0.0, "TOO_CLOSE"
+    if candidate.source_tier >= 3 and CLASS_ORDER[capped] > CLASS_ORDER["MICRO"]:
+        capped = "MICRO"
 
-    if books < 2:
-        return "PASS", 0.0, "LOW_BOOK_COUNT"
+    if not candidate.lineup_confirmed and candidate.market in ("spreads", "totals"):
+        if request.strict:
+            return "PASS"
+        if CLASS_ORDER[capped] > CLASS_ORDER["MICRO"]:
+            capped = "MICRO"
 
-    if data_quality == "bad":
-        return "PASS", 0.0, "LOW_DATA_QUALITY"
+    sport_cfg = DEFAULT_CONFIG["sport_tiers"].get(candidate.sport, {"max_class": "CORE"})
+    max_class = sport_cfg["max_class"]
+    if CLASS_ORDER[capped] > CLASS_ORDER[max_class]:
+        capped = max_class
 
-    if ev < 0:
-        return "PASS", 0.0, "EV_NEGATIVE"
+    return capped
 
-    if strict_flag == 1 and ev < 5:
-        return "PASS", 0.0, "STRICT_EV_TOO_LOW"
 
-    if mode == "emergency" and ev < 4:
-        return "PASS", 0.0, "EMERGENCY_EV_TOO_LOW"
+def calculate_risk_cap(request: AutoRequest, decision_class: str) -> float:
+    rules = DEFAULT_CONFIG["mode_rules"][request.mode]
+    if decision_class == "MICRO":
+        return rules["max_micro_stake"]
+    if decision_class == "SUPPORT":
+        return rules["max_support_stake"]
+    if decision_class == "CORE":
+        return rules["max_core_stake"]
+    return 0.0
 
-    if odds > 3.00:
-        return "PASS", 0.0, "ODDS_TOO_HIGH"
 
-    if mode == "emergency" and odds > 2.20:
-        return "PASS", 0.0, "EMERGENCY_ODDS_CAP"
+def calculate_stake(request: AutoRequest, decision_class: str, ev_calibrated: float, odds: float, risk_cap: float) -> float:
+    if decision_class == "PASS":
+        return 0.0
+    b = max(odds - 1.0, 0.01)
+    p = max(min((implied_probability(odds) + ev_calibrated) / 100.0, 0.95), 0.01)
+    q = 1 - p
+    kelly = max(((b * p) - q) / b, 0.0)
+    stake = request.bank * kelly * 0.25
+    stake = min(stake, risk_cap)
+    unit = DEFAULT_CONFIG["unit"]
+    rounded = math.floor(stake / unit) * unit
+    return float(max(rounded, unit if rounded == 0 and stake > 0 else 0))
 
-    if strict_flag == 1 and odds > 2.00:
-        return "PASS", 0.0, "STRICT_ODDS_CAP"
 
-    if odds <= 1.60:
-        bet_class = "CORE"
-        pct = 0.03
-        reason = "LOW_ODDS_STABLE"
-    elif odds <= 2.20:
-        bet_class = "SUPPORT"
-        pct = 0.02
-        reason = "MID_ODDS_OK"
+def finalize_decision(candidate: Candidate, request: AutoRequest, run_id: str) -> FinalDecision:
+    now = datetime.now(UTC)
+    reasons: List[str] = []
+
+    implied = implied_probability(candidate.odds_best)
+    ev_raw = calc_ev_raw(candidate.model_prob, candidate.odds_best)
+    data_quality = calc_data_quality(candidate)
+    ev_cal = round(ev_raw * calibration_factor(candidate, data_quality), 2)
+    ci_low = calc_ci_low(ev_cal, candidate, data_quality)
+
+    decision = "PASS"
+    stake = 0.0
+
+    if candidate.commence_time < now:
+        reasons.append("EXPIRED_EVENT")
+    elif (candidate.commence_time - now) < timedelta(minutes=10):
+        reasons.append("TOO_CLOSE")
+    elif candidate.odds_age_minutes > 240:
+        reasons.append("STALE_ODDS")
+    elif candidate.injury_fresh_hours > 4:
+        reasons.append("STALE_INJURY")
+    elif candidate.book_count < 2:
+        reasons.append("LOW_BOOK_COUNT")
+    elif ci_low < 0:
+        reasons.append("CI_LOW_NEGATIVE")
+    elif request.mode == "EMERGENCY" and ev_cal < DEFAULT_CONFIG["mode_rules"]["EMERGENCY"]["min_ev_calibrated"]:
+        reasons.append("EMERGENCY_CAP")
+    elif request.mode == "EMERGENCY" and candidate.variance in ("HIGH", "EXTREME"):
+        reasons.append("HIGH_VARIANCE")
     else:
-        bet_class = "MICRO"
-        pct = 0.01
-        reason = "HIGH_RISK_MICRO"
+        base_class = class_from_ev(ev_cal, ci_low, data_quality)
+        decision = apply_class_caps(base_class, candidate, request)
 
-    if ev >= 8 and bet_class == "SUPPORT":
-        bet_class = "CORE"
+        if not candidate.lineup_confirmed and candidate.market in ("spreads", "totals"):
+            reasons.append("LINEUP_PENDING")
+        if candidate.source_tier >= 3:
+            reasons.append("SPORT_TIER_CAP")
+        if candidate.book_count < 3:
+            reasons.append("NO_CONSENSUS")
 
-    if ev < 3 and bet_class == "CORE":
-        bet_class = "SUPPORT"
-
-    if lineup == "no":
-        if mode == "emergency":
-            return "PASS", 0.0, "LINEUP_PENDING"
-        bet_class = lower_class(bet_class)
-        reason = "LINEUP_NOT_CONFIRMED"
-
-    if sport == "unknown":
-        bet_class = lower_class(bet_class)
-        reason = "UNKNOWN_SPORT"
-
-    if bet_class == "PASS":
-        return "PASS", 0.0, reason
-
-    if mode == "emergency":
-        if bet_class == "CORE":
-            pct = 0.02
-        elif bet_class == "SUPPORT":
-            pct = 0.01
-        elif bet_class == "MICRO":
-            pct = 0.005
-
-    stake = round(bank * pct, 2)
-
-    if mode == "emergency" and stake > 25:
-        stake = 25.0
-
-    return bet_class, stake, reason
-
-
-def build_text(kind, sport, league, team, market, odds, bank, mode, strict_flag, ev, books, data_quality, mins_to_start, lineup, bet_class, stake, reason):
-    text = kind + " " + "sport=" + sport + " league=" + league + " team=" + team + " market=" + market + " odds=" + str(odds) + " bank=" + str(bank) + " mode=" + mode + " strict=" + str(strict_flag) + " ev=" + str(ev) + " books=" + str(books) + " data=" + data_quality + " mins=" + str(mins_to_start) + " lineup=" + lineup + " class=" + bet_class + " stake=" + str(stake) + " reason=" + reason
-    return text
-
-
-def add_run(text):
-    global RUNS
-    RUNS.insert(0, text)
-    if len(RUNS) > 5:
-        RUNS = RUNS[:5]
-
-
-def extract_value(text, key):
-    marker = key + "="
-    parts = text.split(" ")
-    for part in parts:
-        if part.startswith(marker):
-            return part[len(marker):]
-    return ""
-
-
-def save_last_run():
-    global LAST_RUN
-    try:
-        with open(LAST_RUN_FILE, "w", encoding="utf-8") as f:
-            f.write(LAST_RUN)
-    except:
-        pass
-
-
-def save_runs():
-    global RUNS
-    try:
-        text = " || ".join(RUNS)
-        with open(RUNS_FILE, "w", encoding="utf-8") as f:
-            f.write(text)
-    except:
-        pass
-
-
-def build_audit_dict(text):
-    data = {}
-    data["raw"] = text
-    data["kind"] = text.split(" ")[0] if " " in text else text
-    data["sport"] = extract_value(text, "sport")
-    data["league"] = extract_value(text, "league")
-    data["team"] = extract_value(text, "team")
-    data["market"] = extract_value(text, "market")
-    data["odds"] = extract_value(text, "odds")
-    data["bank"] = extract_value(text, "bank")
-    data["mode"] = extract_value(text, "mode")
-    data["strict"] = extract_value(text, "strict")
-    data["ev"] = extract_value(text, "ev")
-    data["books"] = extract_value(text, "books")
-    data["data"] = extract_value(text, "data")
-    data["mins"] = extract_value(text, "mins")
-    data["lineup"] = extract_value(text, "lineup")
-    data["class"] = extract_value(text, "class")
-    data["stake"] = extract_value(text, "stake")
-    data["reason"] = extract_value(text, "reason")
-    return data
-
-
-def save_audit(text):
-    try:
-        data = build_audit_dict(text)
-        with open(AUDIT_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=True)
-    except:
-        pass
-
-
-def load_files_to_memory():
-    global LAST_RUN
-    global RUNS
-
-    try:
-        if os.path.exists(LAST_RUN_FILE):
-            with open(LAST_RUN_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content != "":
-                    LAST_RUN = content
-    except:
-        pass
-
-    try:
-        if os.path.exists(RUNS_FILE):
-            with open(RUNS_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content != "":
-                    RUNS = content.split(" || ")[:5]
-    except:
-        pass
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot online")
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Status online")
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Commands: /status /auto /dryrun /report /history /summary /audit /files /help ; Format: SPORT=football LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good MINS=120 LINEUP=yes"
-    await update.message.reply_text(text)
-
-
-async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global LAST_RUN
-    await update.message.reply_text(LAST_RUN)
-
-
-async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global RUNS
-    if len(RUNS) == 0:
-        await update.message.reply_text("No runs yet")
-        return
-    text = "HISTORY " + " || ".join(RUNS)
-    await update.message.reply_text(text)
-
-
-async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global RUNS
-    if len(RUNS) == 0:
-        await update.message.reply_text("SUMMARY No runs yet")
-        return
-
-    total = len(RUNS)
-    pass_count = 0
-    non_pass = []
-
-    for run in RUNS:
-        cls = extract_value(run, "class")
-        reason = extract_value(run, "reason")
-        team = extract_value(run, "team")
-        stake = extract_value(run, "stake")
-
-        if cls == "PASS":
-            pass_count = pass_count + 1
+        if decision == "PASS":
+            if not reasons:
+                reasons.append("EV_TOO_LOW")
         else:
-            item = team + ":" + cls + ":" + stake + ":" + reason
-            non_pass.append(item)
+            reasons.extend(["EDGE_OK", f"DATA_QUALITY_{data_quality}", f"CLASS_{decision}"])
+            risk_cap = calculate_risk_cap(request, decision)
+            stake = calculate_stake(request, decision, ev_cal, candidate.odds_best, risk_cap)
+            return FinalDecision(
+                run_id=run_id,
+                generated_at=now.isoformat(),
+                match=candidate.match,
+                sport=candidate.sport,
+                market=candidate.market,
+                selection=candidate.selection,
+                point=candidate.point,
+                best_odds=candidate.odds_best,
+                avg_odds=candidate.odds_avg,
+                bookmaker=candidate.bookmaker,
+                book_count=candidate.book_count,
+                model_prob=candidate.model_prob,
+                implied_prob=implied,
+                ev_raw=ev_raw,
+                ev_calibrated=ev_cal,
+                ci_low=ci_low,
+                risk_cap=risk_cap,
+                data_quality=data_quality,
+                decision=decision,
+                stake=stake,
+                reasons=reasons,
+            )
 
-    if pass_count == total:
-        text = "SUMMARY NO_BETS ALL_PASS total=" + str(total)
-        await update.message.reply_text(text)
-        return
-
-    accepted = " | ".join(non_pass)
-    text = "SUMMARY total=" + str(total) + " pass=" + str(pass_count) + " active=" + str(len(non_pass)) + " picks=" + accepted
-    await update.message.reply_text(text)
-
-
-async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global LAST_RUN
-    if LAST_RUN == "No runs yet":
-        await update.message.reply_text("AUDIT No runs yet")
-        return
-
-    sport = extract_value(LAST_RUN, "sport")
-    cls = extract_value(LAST_RUN, "class")
-    reason = extract_value(LAST_RUN, "reason")
-    stake = extract_value(LAST_RUN, "stake")
-    ev = extract_value(LAST_RUN, "ev")
-    books = extract_value(LAST_RUN, "books")
-    data_quality = extract_value(LAST_RUN, "data")
-
-    text = "AUDIT " + "sport=" + sport + " class=" + cls + " stake=" + stake + " ev=" + ev + " books=" + books + " data=" + data_quality + " reason=" + reason
-    await update.message.reply_text(text)
-
-
-async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    files = []
-    if os.path.exists(LAST_RUN_FILE):
-        files.append(LAST_RUN_FILE)
-    if os.path.exists(RUNS_FILE):
-        files.append(RUNS_FILE)
-    if os.path.exists(AUDIT_FILE):
-        files.append(AUDIT_FILE)
-
-    if len(files) == 0:
-        await update.message.reply_text("FILES none")
-        return
-
-    text = "FILES " + " ".join(files)
-    await update.message.reply_text(text)
-
-
-async def run_analysis(update, context, dry_mode):
-    global LAST_RUN
-
-    if not context.args:
-        await update.message.reply_text("Use /auto SPORT=football LEAGUE=EPL TEAM=Arsenal MARKET=ML ODDS=1.85 BANK=100 MODE=normal STRICT=0 EV=6 BOOKS=4 DATA=good MINS=120 LINEUP=yes")
-        return
-
-    params = parse_params(context.args)
-
-    sport = normalize_sport(params.get("SPORT", "unknown"))
-    league = params.get("LEAGUE", "UNKNOWN")
-    team = params.get("TEAM", "UNKNOWN")
-    market = params.get("MARKET", "ML")
-
-    odds = to_float(params.get("ODDS", "1.80"), 1.80)
-    bank = to_float(params.get("BANK", "100"), 100.0)
-    mode = normalize_mode(params.get("MODE", "normal"))
-    strict_flag = normalize_strict(params.get("STRICT", "0"))
-    ev = to_float(params.get("EV", "0"), 0.0)
-    books = to_int(params.get("BOOKS", "1"), 1)
-    data_quality = normalize_data(params.get("DATA", "unknown"))
-    mins_to_start = to_int(params.get("MINS", "999"), 999)
-    lineup = normalize_lineup(params.get("LINEUP", "no"))
-
-    bet_class, stake, reason = decide(
-        odds,
-        bank,
-        mode,
-        strict_flag,
-        ev,
-        books,
-        data_quality,
-        mins_to_start,
-        lineup,
-        sport
+    return FinalDecision(
+        run_id=run_id,
+        generated_at=now.isoformat(),
+        match=candidate.match,
+        sport=candidate.sport,
+        market=candidate.market,
+        selection=candidate.selection,
+        point=candidate.point,
+        best_odds=candidate.odds_best,
+        avg_odds=candidate.odds_avg,
+        bookmaker=candidate.bookmaker,
+        book_count=candidate.book_count,
+        model_prob=candidate.model_prob,
+        implied_prob=implied,
+        ev_raw=ev_raw,
+        ev_calibrated=ev_cal,
+        ci_low=ci_low,
+        risk_cap=0.0,
+        data_quality=data_quality,
+        decision="PASS",
+        stake=0.0,
+        reasons=reasons or ["UNKNOWN_PASS"],
     )
 
-    kind = "AUTO"
 
-    if dry_mode:
-        stake = 0.0
-        kind = "DRYRUN"
-
-    text = build_text(
-        kind,
-        sport,
-        league,
-        team,
-        market,
-        odds,
-        bank,
-        mode,
-        strict_flag,
-        ev,
-        books,
-        data_quality,
-        mins_to_start,
-        lineup,
-        bet_class,
-        stake,
-        reason
+def sort_results(results: List[FinalDecision]) -> List[FinalDecision]:
+    return sorted(
+        results,
+        key=lambda x: (
+            CLASS_ORDER.get(x.decision, 0),
+            x.ev_calibrated,
+            x.ci_low,
+            x.book_count,
+            2 if x.data_quality == "HIGH" else 1 if x.data_quality == "MEDIUM" else 0,
+        ),
+        reverse=True,
     )
 
-    LAST_RUN = text
-    add_run(text)
-    save_last_run()
-    save_runs()
-    save_audit(text)
 
+def fetch_candidates_stub(request: AutoRequest) -> List[Candidate]:
+    now = datetime.now(UTC)
+    sport = request.sports[0]
+    return [
+        Candidate(
+            match="Liberty vs Sun",
+            sport=sport,
+            market="spreads",
+            selection="Liberty -4.5",
+            point=-4.5,
+            commence_time=now + timedelta(hours=5),
+            odds_best=1.91,
+            odds_avg=1.84,
+            book_count=6,
+            model_prob=56.2,
+            lineup_confirmed=True,
+            injury_fresh_hours=1.0,
+            odds_age_minutes=20,
+            source_tier=2,
+            variance="MEDIUM",
+        ),
+        Candidate(
+            match="Aces vs Storm",
+            sport=sport,
+            market="totals",
+            selection="Over 167.5",
+            point=167.5,
+            commence_time=now + timedelta(hours=2),
+            odds_best=1.87,
+            odds_avg=1.83,
+            book_count=4,
+            model_prob=54.0,
+            lineup_confirmed=False,
+            injury_fresh_hours=2.0,
+            odds_age_minutes=35,
+            source_tier=2,
+            variance="MEDIUM",
+        ),
+        Candidate(
+            match="Wings vs Fever",
+            sport=sport,
+            market="h2h",
+            selection="Fever ML",
+            point=None,
+            commence_time=now + timedelta(minutes=8),
+            odds_best=2.05,
+            odds_avg=1.98,
+            book_count=5,
+            model_prob=51.5,
+            lineup_confirmed=True,
+            injury_fresh_hours=1.0,
+            odds_age_minutes=15,
+            source_tier=2,
+            variance="HIGH",
+        ),
+    ]
+
+
+def run_auto_pipeline(request_text: str, dry_run: bool = False) -> Dict[str, Any]:
+    request = parse_auto_request(request_text, dry_run=dry_run)
+    run_id = uuid.uuid4().hex[:10]
+
+    candidates = fetch_candidates_stub(request)[:request.max_candidates]
+    results = [finalize_decision(c, request, run_id) for c in candidates]
+    results = sort_results(results)
+
+    actionable = [r for r in results if r.decision != "PASS"]
+
+    summary = {
+        "run_id": run_id,
+        "request": asdict(request),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "candidates_count": len(results),
+        "accepted_count": len(actionable),
+        "rejected_count": len(results) - len(actionable),
+        "status": "OK" if results else "NO_CANDIDATES",
+        "message": "NO BETS / ALL PASS" if results and not actionable else "OK",
+        "results": [asdict(r) for r in results],
+    }
+
+    if not dry_run:
+        txt_path = write_txt_report(summary)
+        json_path = write_audit_json(summary)
+        LAST_RUN_PATH.write_text(format_summary_for_telegram(summary), encoding="utf-8")
+        with RUNS_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "run_id": run_id,
+                "generated_at": summary["generated_at"],
+                "request": request_text,
+                "accepted_count": summary["accepted_count"],
+                "rejected_count": summary["rejected_count"],
+                "txt_report": txt_path,
+                "audit_json": json_path,
+            }, ensure_ascii=False) + "
+")
+        AUDIT_PATH.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return summary
+
+
+def write_txt_report(summary: Dict[str, Any]) -> str:
+    path = REPORTS_DIR / f"{datetime.now().date()}_{summary['run_id']}_report.txt"
+    req = summary["request"]
+
+    lines = [
+        f"DAILY REPORT | {datetime.now().date()}",
+        f"Request: {req['raw_text']}",
+        f"Mode: {req['mode']}",
+        f"Candidates: {summary['candidates_count']}",
+        f"Accepted: {summary['accepted_count']}",
+        f"Rejected: {summary['rejected_count']}",
+        f"Status: {summary['message']}",
+        "",
+    ]
+
+    for i, r in enumerate(summary["results"], start=1):
+        lines.extend([
+            f"{i}) {r['match']}",
+            f"Market: {r['selection']}",
+            f"Best odds: {r['best_odds']} at {r['bookmaker']}",
+            f"Avg odds: {r['avg_odds']} | Book count: {r['book_count']}",
+            f"ModelProb: {r['model_prob']} | Implied: {r['implied_prob']}",
+            f"EV raw: {r['ev_raw']} | EV calibrated: {r['ev_calibrated']} | CI low: {r['ci_low']}",
+            f"Decision: {r['decision']} | Stake: {r['stake']} | Risk cap: {r['risk_cap']}",
+            f"Data quality: {r['data_quality']}",
+            f"Reasons: {', '.join(r['reasons'])}",
+            "",
+        ])
+
+    path.write_text("
+".join(lines), encoding="utf-8")
+    return str(path)
+
+
+def write_audit_json(summary: Dict[str, Any]) -> str:
+    path = LOGS_DIR / f"{datetime.now().date()}_{summary['run_id']}_audit.json"
+    path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def format_summary_for_telegram(summary: Dict[str, Any]) -> str:
+    lines = [
+        f"Run: {summary['run_id']}",
+        f"Status: {summary['message']}",
+        f"Candidates: {summary['candidates_count']}",
+        f"Accepted: {summary['accepted_count']}",
+        f"Rejected: {summary['rejected_count']}",
+        "",
+    ]
+
+    for r in summary["results"][:5]:
+        if r["decision"] == "PASS":
+            lines.append(f"PASS | {r['match']} | {', '.join(r['reasons'])}")
+        else:
+            lines.append(
+                f"{r['decision']} | {r['match']} | stake {r['stake']} | EV {r['ev_calibrated']} | CI {r['ci_low']}"
+            )
+
+    return "
+".join(lines)
+
+
+def format_last_report_text() -> str:
+    if LAST_RUN_PATH.exists():
+        return LAST_RUN_PATH.read_text(encoding="utf-8")
+    return "Пока нет last_run.txt"
+
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "Бот запущен.
+"
+        "Команды:
+"
+        "/auto today basketball strict
+"
+        "/dryrun today basketball strict
+"
+        "/report
+"
+        "/audit"
+    )
     await update.message.reply_text(text)
 
 
 async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_analysis(update, context, False)
+    args = " ".join(context.args).strip()
+    request_text = f"AUTO {args}" if args else "AUTO today basketball strict"
+
+    try:
+        summary = run_auto_pipeline(request_text, dry_run=False)
+        await update.message.reply_text(format_summary_for_telegram(summary))
+    except Exception as e:
+        await update.message.reply_text(f"ERROR_REPORT
+{type(e).__name__}: {e}")
 
 
 async def dryrun_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_analysis(update, context, True)
+    args = " ".join(context.args).strip()
+    request_text = f"AUTO {args}" if args else "AUTO today basketball strict"
+
+    try:
+        summary = run_auto_pipeline(request_text, dry_run=True)
+        text = "[DRYRUN]
+" + format_summary_for_telegram(summary)
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"ERROR_REPORT
+{type(e).__name__}: {e}")
+
+
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(format_last_report_text())
+
+
+async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if AUDIT_PATH.exists():
+        raw = AUDIT_PATH.read_text(encoding="utf-8")
+        if len(raw) > 3500:
+            raw = raw[:3500] + "
+...truncated..."
+        await update.message.reply_text(raw)
+    else:
+        await update.message.reply_text("Пока нет audit.json")
 
 
 def main():
-    load_files_to_memory()
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN or BOT_TOKEN is not set")
 
-    if not TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN not set")
-
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("report", report_cmd))
-    app.add_handler(CommandHandler("history", history_cmd))
-    app.add_handler(CommandHandler("summary", summary_cmd))
-    app.add_handler(CommandHandler("audit", audit_cmd))
-    app.add_handler(CommandHandler("files", files_cmd))
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("auto", auto_cmd))
     app.add_handler(CommandHandler("dryrun", dryrun_cmd))
-    app.run_polling(drop_pending_updates=True)
+    app.add_handler(CommandHandler("report", report_cmd))
+    app.add_handler(CommandHandler("audit", audit_cmd))
 
-
-if __name__ == "__main__":
-    main()
+    print("Bot started")
+    app.run_pollin
