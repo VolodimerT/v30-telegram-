@@ -496,15 +496,17 @@ def run_auto_pipeline(request_text: str, dry_run: bool = False) -> Dict[str, Any
         json_path = write_audit_json(summary)
         LAST_RUN_PATH.write_text(format_summary_for_telegram(summary), encoding="utf-8")
         with RUNS_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "run_id": run_id,
-                "generated_at": summary["generated_at"],
-                "request": request_text,
-                "accepted_count": summary["accepted_count"],
-                "rejected_count": summary["rejected_count"],
-                "txt_report": txt_path,
-                "audit_json": json_path,
-            }, ensure_ascii=False) + "
+    line = json.dumps({
+        "run_id": run_id,
+        "generated_at": summary["generated_at"],
+        "request": request_text,
+        "accepted_count": summary["accepted_count"],
+        "rejected_count": summary["rejected_count"],
+        "txt_report": txt_path,
+        "audit_json": json_path,
+    }, ensure_ascii=False)
+    f.write(line + "
+")
 ")
         AUDIT_PATH.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
