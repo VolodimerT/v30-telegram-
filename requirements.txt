@@ -2,3 +2,7 @@ python-telegram-bot>=20.0
 requests>=2.31
 apscheduler>=3.10.4
 pytz>=2023.3
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
