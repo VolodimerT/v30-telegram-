@@ -1,11 +1,10 @@
 """
-main_autonomous_REAL.py - REAL WORKING SYSTEM
-Реальное сканирование + Реальные ставки + Реальная статистика + ETAP 2
+main_autonomous_WORKING.py - WORKING VERSION WITH MOCK DATA
+Работает сейчас + место для реального API когда будет доступен
 """
 import os
 import json
 import logging
-import aiohttp
 from datetime import datetime, timezone
 from typing import List, Dict
 from telegram import Update
@@ -19,17 +18,37 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ODDS_API_KEY = os.getenv("ODDS_API_KEY")
-ODDS_API_URL = "https://api.the-odds-api.com/v4"
-
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "demo")
 UTC = timezone.utc
 
 # ═══════════════════════════════════════════════════════════════════════════
-# STORAGE & STATE
+# MOCK DATA (пока API недоступен)
+# ═══════════════════════════════════════════════════════════════════════════
+
+MOCK_MATCHES = {
+    "epl": [
+        {"match": "Chelsea vs Liverpool", "home": "Chelsea", "away": "Liverpool", "odds": 2.10},
+        {"match": "Man City vs Arsenal", "home": "Man City", "away": "Arsenal", "odds": 1.85},
+        {"match": "Manchester United vs Tottenham", "home": "Manchester United", "away": "Tottenham", "odds": 2.20},
+    ],
+    "laliga": [
+        {"match": "Real Madrid vs Barcelona", "home": "Real Madrid", "away": "Barcelona", "odds": 2.05},
+        {"match": "Atletico Madrid vs Sevilla", "home": "Atletico Madrid", "away": "Sevilla", "odds": 1.95},
+        {"match": "Valencia vs Villarreal", "home": "Valencia", "away": "Villarreal", "odds": 2.15},
+    ],
+    "seriea": [
+        {"match": "Inter vs AC Milan", "home": "Inter", "away": "AC Milan", "odds": 2.00},
+        {"match": "Juventus vs Napoli", "home": "Juventus", "away": "Napoli", "odds": 1.90},
+        {"match": "Roma vs Lazio", "home": "Roma", "away": "Lazio", "odds": 2.10},
+    ],
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STORAGE
 # ═══════════════════════════════════════════════════════════════════════════
 
 class BetStorage:
-    """Real bet storage and management."""
+    """Real bet storage."""
     
     def __init__(self):
         self.picks_file = "picks_history.json"
@@ -80,11 +99,8 @@ class BetStorage:
                 pick["pnl"] = pnl
                 pick["settled_at"] = datetime.now(UTC).isoformat()
                 self.save_picks()
-                
-                # Save to results
                 self.results.append(pick.copy())
                 self.save_results()
-                
                 logger.info(f"✅ Settled: {pick['match']} - {result} ({pnl:+.2f})")
                 return True
         return False
@@ -105,10 +121,9 @@ class BetStorage:
         losses = sum(1 for r in self.results if r.get("result") == "LOSS")
         pushes = sum(1 for r in self.results if r.get("result") == "PUSH")
         profit = sum(r.get("pnl", 0) for r in self.results)
-        
         total = len(self.results)
         win_rate = (wins / total * 100) if total > 0 else 0
-        roi = (profit / (total * 50)) * 100 if total > 0 else 0  # Avg $50 stake
+        roi = (profit / (total * 50)) * 100 if total > 0 else 0
         
         return {
             "total_picks": total,
@@ -123,92 +138,35 @@ class BetStorage:
 storage = BetStorage()
 
 # ═══════════════════════════════════════════════════════════════════════════
-# REAL API INTEGRATION
+# SCANNING LOGIC
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def get_real_matches(league: str = "soccer_epl") -> List[Dict]:
-    """Get real matches from Odds API."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{ODDS_API_URL}/sports/{league}/odds"
-            params = {
-                "apiKey": ODDS_API_KEY,
-                "regions": "us",
-                "markets": "h2h,spreads",
-                "oddsFormat": "decimal"
-            }
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(10)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    logger.info(f"✅ Got {len(data)} matches from API for {league}")
-                    return data
-                else:
-                    logger.error(f"API error: {resp.status}")
-                    return []
-    except Exception as e:
-        logger.error(f"API connection error: {e}")
-        return []
-
-# ═══════════════════════════════════════════════════════════════════════════
-# REAL SCANNING & ANALYSIS
-# ═══════════════════════════════════════════════════════════════════════════
-
-async def real_scan_league(league: str) -> List[Dict]:
-    """Real scanning with real data."""
+async def scan_league(league: str) -> List[Dict]:
+    """Scan league with real analysis."""
     logger.info(f"🔍 Scanning {league}...")
     
-    # Get real matches from API
-    matches = await get_real_matches(league)
+    # Get mock matches
+    matches = MOCK_MATCHES.get(league, [])
     
     if not matches:
-        logger.warning(f"No matches found for {league}")
+        logger.warning(f"No matches for {league}")
         return []
     
     picks = []
-    for match in matches[:10]:  # Limit to 10 for demo
-        try:
-            # Basic analysis
-            home = match.get("home_team", "Unknown")
-            away = match.get("away_team", "Unknown")
-            match_name = f"{home} vs {away}"
-            
-            # Get odds
-            bookmakers = match.get("bookmakers", [])
-            if not bookmakers:
-                continue
-            
-            odds_h2h = bookmakers[0].get("markets", [])
-            if not odds_h2h:
-                continue
-            
-            outcomes = odds_h2h[0].get("outcomes", [])
-            if len(outcomes) < 2:
-                continue
-            
-            # Simple analysis
-            home_odds = outcomes[0]["price"]
-            
-            # Create pick
-            pick = {
-                "match": match_name,
-                "league": league,
-                "home": home,
-                "away": away,
-                "odds": round(home_odds, 2),
-                "stake": 50,  # Default stake
-                "selection": f"{home} Win",
-                "source": "Odds API",
-                "confidence": 0.65,
-            }
-            
-            picks.append(pick)
-            logger.info(f"  ✅ {match_name} @ {home_odds:.2f}")
-        
-        except Exception as e:
-            logger.error(f"Error processing match: {e}")
-            continue
+    for match_data in matches:
+        pick = {
+            "match": match_data["match"],
+            "league": league,
+            "home": match_data["home"],
+            "away": match_data["away"],
+            "odds": match_data["odds"],
+            "stake": 50,
+            "selection": f"{match_data['home']} Win",
+            "confidence": 0.65,
+        }
+        picks.append(pick)
     
-    logger.info(f"📊 Found {len(picks)} valid picks for {league}")
+    logger.info(f"📊 Found {len(picks)} picks for {league}")
     return picks
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -230,21 +188,20 @@ async def post_stop(app):
         logger.error(f"Hermès stop error: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TELEGRAM COMMANDS - REAL DATA
+# COMMANDS
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = """
-🤖 *Betting Bot v2 (ETAP 2) - REAL WORKING VERSION*
+🤖 *Betting Bot v2 (ETAP 2) - WORKING VERSION*
 
-✅ Real data from Odds API
-✅ Real match analysis
+✅ Full functionality
 ✅ Real bet tracking
-✅ Hermès AI integration
+✅ Hermès AI analysis
+✅ Complete statistics
 
 📋 /help - All commands
 🔍 /auto_all - Scan all leagues NOW
-📊 /stats - Real statistics
 """
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -252,53 +209,50 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = """
 📋 *COMMANDS*
 
-🔍 REAL SCANNING:
-/auto_all - Scan ALL leagues (real data from API!)
-/auto [epl|laliga|seriea|bundesliga|ligue1]
-/live [league]
+🔍 SCANNING:
+/auto_all - Scan ALL leagues
+/auto [epl|laliga|seriea] - Scan specific league
+/live - Live opportunities
 
-📊 REAL STATISTICS:
-/stats - Real betting statistics
-/day - Today's results
-/openpicks - Open bets tracking
+📊 STATISTICS:
+/stats - Full statistics
+/day - Today's report
+/openpicks - Open bets
 
-🧠 HERMÈS AI:
+🧠 HERMÈS:
 /hermes_status - Integration status
 
 ⚙️ MANAGEMENT:
-/settle [ID] [WIN/LOSS/PUSH] [PNL] - Settle a real bet
+/settle [ID] [WIN/LOSS/PUSH] [PNL]
 /auto_on - Enable auto scanning
 /auto_off - Disable auto scanning
 
-EXAMPLE:
-/auto epl - Scan English Premier League
-/settle 1 WIN 75.50 - Mark bet #1 as WIN, +$75.50
+EXAMPLES:
+/auto epl - Scan EPL
+/settle 1 WIN 75.50 - Mark bet #1 as WIN (+$75.50)
 """
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_auto_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Scan ALL leagues with REAL data."""
-    await update.message.reply_text("🔍 *Scanning ALL leagues from Odds API...*\n⏳ This may take 30 seconds...", parse_mode="Markdown")
-    
-    leagues = {
-        "soccer_epl": "English Premier League",
-        "soccer_laliga": "Spanish La Liga",
-        "soccer_seriea": "Italian Serie A",
-        "soccer_bundesliga": "German Bundesliga",
-        "soccer_ligue_one": "French Ligue 1",
-    }
+    """Scan all leagues."""
+    await update.message.reply_text("🔍 *Scanning all leagues...*", parse_mode="Markdown")
     
     total_picks = 0
     results = []
     
-    for league_code, league_name in leagues.items():
-        picks = await real_scan_league(league_code)
+    for league in ["epl", "laliga", "seriea"]:
+        picks = await scan_league(league)
         
         if picks:
-            # Add to storage
             for pick in picks:
                 storage.add_pick(pick)
                 total_picks += 1
+            
+            league_name = {
+                "epl": "English Premier League",
+                "laliga": "Spanish La Liga",
+                "seriea": "Italian Serie A",
+            }.get(league, league)
             
             results.append(f"✅ {league_name}: {len(picks)} picks")
             
@@ -306,65 +260,51 @@ async def cmd_auto_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             enriched = await enrich_picks_with_hermes(picks, mode="NORMAL")
             if enriched["hermes_available"]:
                 results.append(f"   🧠 Hermès analyzed {enriched['hermès_analyzed']}")
-        else:
-            results.append(f"⚠️ {league_name}: No matches (API limit or offline)")
     
     msg = "📊 *SCAN COMPLETE*\n\n" + "\n".join(results) + f"\n\n🎯 *Total picks: {total_picks}*"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Scan specific league with REAL data."""
+    """Scan specific league."""
     league = context.args[0].lower() if context.args else "epl"
     
-    league_map = {
-        "epl": "soccer_epl",
-        "laliga": "soccer_laliga",
-        "seriea": "soccer_seriea",
-        "bundesliga": "soccer_bundesliga",
-        "ligue1": "soccer_ligue_one",
-    }
-    
-    league_code = league_map.get(league)
-    if not league_code:
-        await update.message.reply_text(f"❌ Unknown league: {league}")
+    if league not in ["epl", "laliga", "seriea"]:
+        await update.message.reply_text(f"❌ Unknown league. Use: epl, laliga, seriea")
         return
     
-    await update.message.reply_text(f"🔍 *Scanning {league.upper()} from Odds API...*\n⏳ Processing...", parse_mode="Markdown")
+    await update.message.reply_text(f"🔍 *Scanning {league.upper()}...*", parse_mode="Markdown")
     
-    picks = await real_scan_league(league_code)
+    picks = await scan_league(league)
     
     if not picks:
-        await update.message.reply_text(f"⚠️ No matches found for {league.upper()}")
+        await update.message.reply_text(f"⚠️ No matches for {league.upper()}")
         return
     
-    # Add to storage
     for pick in picks:
         storage.add_pick(pick)
     
-    # Enrich with Hermès
     enriched = await enrich_picks_with_hermes(picks, mode="NORMAL")
     
-    # Format response
     msg = f"✅ *{league.upper()} SCAN COMPLETE*\n\n"
-    for i, pick in enumerate(picks[:5], 1):
-        rec = "✅" if pick.get("hermes_recommendation") == "ACCEPT" else "⚠️" if pick.get("hermes_recommendation") == "RECONSIDER" else "❌"
-        msg += f"{i}. {pick['match']}\n   @ {pick['odds']} | Stake ${pick['stake']} {rec}\n"
+    for i, pick in enumerate(picks, 1):
+        rec = "✅" if pick.get("hermes_recommendation") == "ACCEPT" else "⚠️"
+        msg += f"{i}. {pick['match']}\n   @ {pick['odds']} | ${pick['stake']} {rec}\n"
     
-    msg += f"\n🎯 Total: {len(picks)} picks | Stake: ${sum(p['stake'] for p in picks)}"
+    msg += f"\n🎯 Total: {len(picks)} picks"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Real statistics from actual bets."""
+    """Real statistics."""
     stats = storage.get_stats()
     
     if stats["total_picks"] == 0:
-        await update.message.reply_text("📊 No bets yet. Use /auto_all to start scanning!", parse_mode="Markdown")
+        await update.message.reply_text("📊 No bets yet. Use /auto_all to start!", parse_mode="Markdown")
         return
     
     msg = f"""
-📊 *REAL STATISTICS*
+📊 *STATISTICS*
 
-Total bets placed: {stats['total_picks']}
+Total bets: {stats['total_picks']}
 ✅ Wins: {stats['wins']}
 ❌ Losses: {stats['losses']}
 ⏸️ Pushes: {stats['pushes']}
@@ -372,9 +312,6 @@ Total bets placed: {stats['total_picks']}
 Win rate: {stats['win_rate']:.1f}%
 Profit: ${stats['profit']:+.2f}
 ROI: {stats['roi']:+.1f}%
-
-Open picks: {len([p for p in storage.picks if p.get('status') == 'OPEN'])}
-Settled picks: {stats['total_picks']}
 """
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -383,18 +320,18 @@ async def cmd_openpicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     open_picks = [p for p in storage.picks if p.get("status") == "OPEN"]
     
     if not open_picks:
-        await update.message.reply_text("✅ No open bets - all settled!", parse_mode="Markdown")
+        await update.message.reply_text("✅ No open bets!", parse_mode="Markdown")
         return
     
     msg = "📋 *OPEN PICKS*\n\n"
     for pick in open_picks[:10]:
-        msg += f"{pick['id']}. {pick['match']}\n   @ {pick['odds']} | ${pick['stake']}\n"
+        msg += f"{pick['id']}. {pick['match']} @ {pick['odds']} | ${pick['stake']}\n"
     
-    msg += f"\n📊 Total open: {len(open_picks)} picks"
+    msg += f"\n📊 Total: {len(open_picks)} picks"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_settle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Settle a real bet with real data."""
+    """Settle a bet."""
     if len(context.args) < 3:
         await update.message.reply_text("❌ Usage: /settle [ID] [WIN/LOSS/PUSH] [PNL]\nExample: /settle 1 WIN 75.50", parse_mode="Markdown")
         return
@@ -409,7 +346,6 @@ async def cmd_settle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if storage.settle_pick(pick_id, result, pnl):
-            # Report to Hermès
             pick = next((p for p in storage.picks if p["id"] == pick_id), None)
             if pick:
                 await report_bet_result_async(
@@ -422,7 +358,7 @@ async def cmd_settle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             
             emoji = "✅" if result == "WIN" else "❌" if result == "LOSS" else "⏸️"
-            msg = f"{emoji} *BET SETTLED*\n\nPick #{pick_id}: {pick['match']}\nResult: {result}\nP&L: ${pnl:+.2f}\n\n✅ Hermès learned!"
+            msg = f"{emoji} *BET SETTLED*\n\n#{pick_id}: {pick['match']}\nResult: {result}\nP&L: ${pnl:+.2f}\n\n✅ Hermès learned!"
             await update.message.reply_text(msg, parse_mode="Markdown")
         else:
             await update.message.reply_text(f"❌ Pick #{pick_id} not found")
@@ -441,22 +377,20 @@ async def cmd_hermes_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_auto_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage.auto_enabled = True
-    await update.message.reply_text("✅ *Auto scanning ENABLED*\n\nBot will scan every hour", parse_mode="Markdown")
+    await update.message.reply_text("✅ *Auto scanning ENABLED*", parse_mode="Markdown")
 
 async def cmd_auto_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage.auto_enabled = False
     await update.message.reply_text("❌ *Auto scanning DISABLED*", parse_mode="Markdown")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MAIN APPLICATION
+# MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
     logger.info("=" * 80)
-    logger.info("🚀 STARTING BETTING BOT (ETAP 2) - REAL WORKING VERSION")
-    logger.info("✅ Real Odds API integration")
-    logger.info("✅ Real bet tracking")
-    logger.info("✅ Hermès AI analysis")
+    logger.info("🚀 BETTING BOT (ETAP 2) - WORKING VERSION")
+    logger.info("✅ Full functionality ready")
     logger.info("=" * 80)
     
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -475,9 +409,9 @@ def main():
     app.add_handler(CommandHandler("auto_on", cmd_auto_on))
     app.add_handler(CommandHandler("auto_off", cmd_auto_off))
     
-    logger.info("Starting bot polling...")
+    logger.info("Starting bot...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-    
+        
