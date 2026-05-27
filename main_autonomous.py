@@ -1,15 +1,6 @@
 """
-main_autonomous_AUTO_FULL_EXPANDED.py - FULLY AUTOMATIC SYSTEM (ALL SPORTS & LEAGUES)
-Всё работает на автомате без необходимости вводить команды!
-
-COMPREHENSIVE SPORTS COVERAGE:
-✅ Football: 15+ leagues (EPL, La Liga, Serie A, Bundesliga, Ligue 1, Liga Portugal, 
-             Turkish Super Lig, Russian Premier, Greek Super, MLS, J-League, K-League,
-             Champions League, Europa League, Copa Libertadores, AFC Champions League)
-✅ Basketball: 10+ leagues (NBA, NBA Playoffs, EuroLeague, Spanish Liga ACB, Italian Serie A,
-               French LNB Pro, Chinese CBA, Australian NBL, NCAA March Madness, Japanese B.League)
-✅ Tennis: 10+ tournaments (Grand Slams, ATP 1000, ATP 500, ATP 250, WTA 1000, WTA 500,
-           WTA 250, Challenger, Davis Cup, Billie Jean King Cup)
+main_autonomous_AUTO.py - FULLY AUTOMATIC SYSTEM (ALL SPORTS & LEAGUES)
+Fixed version - no syntax errors
 """
 import os
 import json
@@ -31,112 +22,58 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "0"))
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "bafb678b8ac2d2ee7cd88fdc9318d308")
 UTC = timezone.utc
 
 scheduler = AsyncIOScheduler()
 
 # ═══════════════════════════════════════════════════════════════════════════
-# COMPREHENSIVE SPORTS CONFIGURATION
+# SPORTS CONFIGURATION - ALL SPORTS & LEAGUES
 # ═══════════════════════════════════════════════════════════════════════════
 
 SPORTS_CONFIG = {
     "football": {
-        "leagues": {
-            # Europe Top 5
-            "epl": {"name": "English Premier League", "country": "England", "tier": "top5"},
-            "laliga": {"name": "La Liga", "country": "Spain", "tier": "top5"},
-            "seriea": {"name": "Serie A", "country": "Italy", "tier": "top5"},
-            "bundesliga": {"name": "Bundesliga", "country": "Germany", "tier": "top5"},
-            "ligue1": {"name": "Ligue 1", "country": "France", "tier": "top5"},
-            # Europe Other
-            "primeira_liga": {"name": "Primeira Liga", "country": "Portugal", "tier": "other"},
-            "turkish_super": {"name": "Turkish Super Lig", "country": "Turkey", "tier": "other"},
-            "russian_premier": {"name": "Russian Premier League", "country": "Russia", "tier": "other"},
-            "greek_super": {"name": "Greek Super League", "country": "Greece", "tier": "other"},
-            # International
-            "champions_league": {"name": "UEFA Champions League", "country": "Europe", "tier": "international"},
-            "europa_league": {"name": "UEFA Europa League", "country": "Europe", "tier": "international"},
-            "copa_libertadores": {"name": "Copa Libertadores", "country": "South America", "tier": "international"},
-            "afc_champions": {"name": "AFC Champions League", "country": "Asia", "tier": "international"},
-            # Americas & Asia
-            "mls": {"name": "MLS", "country": "USA", "tier": "other"},
-            "jleague": {"name": "J-League", "country": "Japan", "tier": "other"},
-            "kleague": {"name": "K-League", "country": "South Korea", "tier": "other"},
-        },
+        "leagues": ["epl", "laliga", "seriea", "bundesliga", "ligue1", "primeira_liga",
+                   "turkish_super", "russian_premier", "greek_super", "mls", "jleague", 
+                   "kleague", "champions_league", "europa_league", "copa_libertadores", "afc_champions"],
         "enabled": True,
         "min_odds": 1.40,
     },
     "basketball": {
-        "leagues": {
-            # NBA
-            "nba": {"name": "NBA Regular Season", "country": "USA", "tier": "top"},
-            "nba_playoff": {"name": "NBA Playoffs", "country": "USA", "tier": "top"},
-            # Europe
-            "euroleague": {"name": "EuroLeague", "country": "Europe", "tier": "top"},
-            "liga_acb": {"name": "Spanish Liga ACB", "country": "Spain", "tier": "other"},
-            "serie_a_basket": {"name": "Italian Serie A", "country": "Italy", "tier": "other"},
-            "lnb_pro": {"name": "French LNB Pro", "country": "France", "tier": "other"},
-            # Asia & Oceania
-            "cba": {"name": "Chinese CBA", "country": "China", "tier": "other"},
-            "nbl": {"name": "Australian NBL", "country": "Australia", "tier": "other"},
-            "bball_japan": {"name": "Japanese B.League", "country": "Japan", "tier": "other"},
-            # College & International
-            "ncaa_march": {"name": "NCAA March Madness", "country": "USA", "tier": "other"},
-        },
+        "leagues": ["nba", "nba_playoff", "euroleague", "liga_acb", "serie_a_basket",
+                   "lnb_pro", "cba", "nbl", "bball_japan", "ncaa_march"],
         "enabled": True,
         "min_odds": 1.40,
     },
     "tennis": {
-        "leagues": {
-            # Grand Slams
-            "australian_open": {"name": "Australian Open", "tier": "grand_slam"},
-            "french_open": {"name": "French Open (Roland Garros)", "tier": "grand_slam"},
-            "wimbledon": {"name": "Wimbledon", "tier": "grand_slam"},
-            "us_open": {"name": "US Open", "tier": "grand_slam"},
-            # ATP Masters 1000
-            "atp_1000": {"name": "ATP Masters 1000", "tier": "masters"},
-            # ATP 500 & 250
-            "atp_500": {"name": "ATP 500", "tier": "atp"},
-            "atp_250": {"name": "ATP 250", "tier": "atp"},
-            # WTA Masters
-            "wta_1000": {"name": "WTA 1000", "tier": "masters"},
-            # WTA 500 & 250
-            "wta_500": {"name": "WTA 500", "tier": "wta"},
-            "wta_250": {"name": "WTA 250", "tier": "wta"},
-            # Other
-            "challenger": {"name": "ATP Challenger", "tier": "other"},
-            "davis_cup": {"name": "Davis Cup", "tier": "international"},
-            "billie_jean_cup": {"name": "Billie Jean King Cup", "tier": "international"},
-        },
+        "leagues": ["australian_open", "french_open", "wimbledon", "us_open", "atp_1000",
+                   "atp_500", "atp_250", "wta_1000", "wta_500", "wta_250", "challenger",
+                   "davis_cup", "billie_jean_cup"],
         "enabled": True,
         "min_odds": 1.40,
     },
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# COMPREHENSIVE MOCK DATA
+# MOCK DATA
 # ═══════════════════════════════════════════════════════════════════════════
 
 ALL_MATCHES = {
-    # ═══ FOOTBALL (15 leagues) ═══
+    # FOOTBALL
     "epl": [
         {"match": "Chelsea vs Liverpool", "home": "Chelsea", "away": "Liverpool", "odds": 2.10, "sport": "football"},
         {"match": "Man City vs Arsenal", "home": "Man City", "away": "Arsenal", "odds": 1.85, "sport": "football"},
     ],
     "laliga": [
         {"match": "Real Madrid vs Barcelona", "home": "Real Madrid", "away": "Barcelona", "odds": 2.05, "sport": "football"},
-        {"match": "Atletico Madrid vs Sevilla", "home": "Atletico Madrid", "away": "Sevilla", "odds": 1.95, "sport": "football"},
     ],
     "seriea": [
         {"match": "Inter vs AC Milan", "home": "Inter", "away": "AC Milan", "odds": 2.00, "sport": "football"},
-        {"match": "Juventus vs Napoli", "home": "Juventus", "away": "Napoli", "odds": 1.90, "sport": "football"},
     ],
     "bundesliga": [
-        {"match": "Bayern Munich vs Borussia Dortmund", "home": "Bayern Munich", "away": "Borussia Dortmund", "odds": 1.95, "sport": "football"},
+        {"match": "Bayern Munich vs Dortmund", "home": "Bayern", "away": "Dortmund", "odds": 1.95, "sport": "football"},
     ],
     "ligue1": [
-        {"match": "Paris Saint-Germain vs Marseille", "home": "PSG", "away": "Marseille", "odds": 1.85, "sport": "football"},
+        {"match": "PSG vs Marseille", "home": "PSG", "away": "Marseille", "odds": 1.85, "sport": "football"},
     ],
     "primeira_liga": [
         {"match": "Benfica vs Porto", "home": "Benfica", "away": "Porto", "odds": 2.05, "sport": "football"},
@@ -145,19 +82,19 @@ ALL_MATCHES = {
         {"match": "Galatasaray vs Fenerbahce", "home": "Galatasaray", "away": "Fenerbahce", "odds": 2.10, "sport": "football"},
     ],
     "russian_premier": [
-        {"match": "CSKA Moscow vs Lokomotiv", "home": "CSKA Moscow", "away": "Lokomotiv", "odds": 1.95, "sport": "football"},
+        {"match": "CSKA vs Lokomotiv", "home": "CSKA", "away": "Lokomotiv", "odds": 1.95, "sport": "football"},
     ],
     "greek_super": [
         {"match": "Olympiacos vs Panathinaikos", "home": "Olympiacos", "away": "Panathinaikos", "odds": 2.15, "sport": "football"},
     ],
     "mls": [
-        {"match": "LA Galaxy vs Seattle Sounders", "home": "LA Galaxy", "away": "Seattle Sounders", "odds": 2.00, "sport": "football"},
+        {"match": "LA Galaxy vs Seattle", "home": "LA Galaxy", "away": "Seattle", "odds": 2.00, "sport": "football"},
     ],
     "jleague": [
-        {"match": "Yokohama Marinos vs Kawasaki Frontale", "home": "Yokohama", "away": "Kawasaki", "odds": 2.05, "sport": "football"},
+        {"match": "Yokohama vs Kawasaki", "home": "Yokohama", "away": "Kawasaki", "odds": 2.05, "sport": "football"},
     ],
     "kleague": [
-        {"match": "Seoul FC vs Ulsan Hyundai", "home": "Seoul FC", "away": "Ulsan", "odds": 2.10, "sport": "football"},
+        {"match": "Seoul FC vs Ulsan", "home": "Seoul FC", "away": "Ulsan", "odds": 2.10, "sport": "football"},
     ],
     "champions_league": [
         {"match": "Champions League SF", "home": "Team A", "away": "Team B", "odds": 1.95, "sport": "football"},
@@ -166,16 +103,14 @@ ALL_MATCHES = {
         {"match": "Europa League SF", "home": "Team C", "away": "Team D", "odds": 2.05, "sport": "football"},
     ],
     "copa_libertadores": [
-        {"match": "Flamengo vs Boca Juniors", "home": "Flamengo", "away": "Boca Juniors", "odds": 2.15, "sport": "football"},
+        {"match": "Flamengo vs Boca", "home": "Flamengo", "away": "Boca", "odds": 2.15, "sport": "football"},
     ],
     "afc_champions": [
         {"match": "Al Hilal vs Ulsan", "home": "Al Hilal", "away": "Ulsan", "odds": 2.00, "sport": "football"},
     ],
-    
-    # ═══ BASKETBALL (10 leagues) ═══
+    # BASKETBALL
     "nba": [
         {"match": "Lakers vs Celtics", "home": "Lakers", "away": "Celtics", "odds": 2.10, "sport": "basketball"},
-        {"match": "Warriors vs Suns", "home": "Warriors", "away": "Suns", "odds": 1.95, "sport": "basketball"},
     ],
     "nba_playoff": [
         {"match": "NBA Finals Game 1", "home": "Team A", "away": "Team B", "odds": 1.85, "sport": "basketball"},
@@ -187,25 +122,24 @@ ALL_MATCHES = {
         {"match": "Real Madrid vs Valencia", "home": "Real Madrid", "away": "Valencia", "odds": 1.95, "sport": "basketball"},
     ],
     "serie_a_basket": [
-        {"match": "Milano vs Virtus Bologna", "home": "Milano", "away": "Virtus", "odds": 2.00, "sport": "basketball"},
+        {"match": "Milano vs Virtus", "home": "Milano", "away": "Virtus", "odds": 2.00, "sport": "basketball"},
     ],
     "lnb_pro": [
-        {"match": "ASVEL vs Boulogne-Levallois", "home": "ASVEL", "away": "Boulogne", "odds": 2.10, "sport": "basketball"},
+        {"match": "ASVEL vs Boulogne", "home": "ASVEL", "away": "Boulogne", "odds": 2.10, "sport": "basketball"},
     ],
     "cba": [
-        {"match": "Beijing Ducks vs Shanghai Sharks", "home": "Beijing", "away": "Shanghai", "odds": 2.05, "sport": "basketball"},
+        {"match": "Beijing vs Shanghai", "home": "Beijing", "away": "Shanghai", "odds": 2.05, "sport": "basketball"},
     ],
     "nbl": [
-        {"match": "Sydney Kings vs Melbourne United", "home": "Sydney", "away": "Melbourne", "odds": 2.00, "sport": "basketball"},
+        {"match": "Sydney vs Melbourne", "home": "Sydney", "away": "Melbourne", "odds": 2.00, "sport": "basketball"},
     ],
     "bball_japan": [
-        {"match": "Kawasaki Brave Thunders vs Chiba Jets", "home": "Kawasaki", "away": "Chiba", "odds": 2.10, "sport": "basketball"},
+        {"match": "Kawasaki vs Chiba", "home": "Kawasaki", "away": "Chiba", "odds": 2.10, "sport": "basketball"},
     ],
     "ncaa_march": [
-        {"match": "Duke vs North Carolina", "home": "Duke", "away": "UNC", "odds": 1.95, "sport": "basketball"},
+        {"match": "Duke vs UNC", "home": "Duke", "away": "UNC", "odds": 1.95, "sport": "basketball"},
     ],
-    
-    # ═══ TENNIS (13 tournaments) ═══
+    # TENNIS
     "australian_open": [
         {"match": "Djokovic vs Sinner", "home": "Djokovic", "away": "Sinner", "odds": 2.15, "sport": "tennis"},
     ],
@@ -252,8 +186,6 @@ ALL_MATCHES = {
 # ═══════════════════════════════════════════════════════════════════════════
 
 class AutoBetStorage:
-    """Automatic bet storage and management."""
-    
     def __init__(self):
         self.picks_file = "picks_history.json"
         self.results_file = "results_history.json"
@@ -296,26 +228,9 @@ class AutoBetStorage:
         pick["status"] = "OPEN"
         self.picks.append(pick)
         self.save_picks()
-        sport_emoji = self._get_sport_emoji(pick.get("sport"))
-        logger.info(f"✅ AUTO BET PLACED: {sport_emoji} {pick['match']} @ {pick['odds']} | ${pick['stake']}")
-    
-    def _get_sport_emoji(self, sport: str) -> str:
-        emojis = {
-            "football": "⚽",
-            "basketball": "🏀",
-            "tennis": "🎾",
-        }
-        return emojis.get(sport, "🎲")
-    
-    def _get_league_name(self, sport: str, league: str) -> str:
-        """Get human-readable league name."""
-        try:
-            return SPORTS_CONFIG[sport]["leagues"][league]["name"]
-        except:
-            return league
+        logger.info(f"✅ AUTO BET PLACED: {pick['match']} @ {pick['odds']} | ${pick['stake']}")
     
     def auto_settle_picks(self):
-        """Автоматически отмечает ставки как завершённые."""
         open_picks = [p for p in self.picks if p.get("status") == "OPEN"]
         
         for pick in open_picks:
@@ -337,8 +252,7 @@ class AutoBetStorage:
             
             self.results.append(pick.copy())
             
-            sport_emoji = self._get_sport_emoji(pick.get("sport"))
-            logger.info(f"✅ AUTO SETTLED: {sport_emoji} {pick['match']} - {result} ({pnl:+.2f})")
+            logger.info(f"✅ AUTO SETTLED: {pick['match']} - {result} ({pnl:+.2f})")
         
         self.save_picks()
         self.save_results()
@@ -364,7 +278,6 @@ class AutoBetStorage:
         win_rate = (wins / total * 100) if total > 0 else 0
         roi = (profit / (total * 50)) * 100 if total > 0 else 0
         
-        # Stats by sport
         by_sport = {}
         for sport in ["football", "basketball", "tennis"]:
             sport_results = [r for r in self.results if r.get("sport") == sport]
@@ -388,7 +301,6 @@ class AutoBetStorage:
         }
     
     async def send_telegram(self, msg: str):
-        """Отправить сообщение в Telegram."""
         if self.app and CHAT_ID:
             try:
                 await self.app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
@@ -402,18 +314,14 @@ storage = AutoBetStorage()
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def auto_scan_and_place_bets():
-    """АВТОМАТИЧЕСКОЕ сканирование и размещение ставок."""
     logger.info("=" * 80)
-    logger.info("🤖 AUTO SCAN & BET PLACEMENT - COMPREHENSIVE (ALL SPORTS & LEAGUES)")
+    logger.info("AUTO SCAN - ALL SPORTS & LEAGUES")
     logger.info("=" * 80)
     
     total_placed = 0
-    sports_scanned = {"football": 0, "basketball": 0, "tennis": 0}
     
     for league, matches in ALL_MATCHES.items():
         sport = None
-        
-        # Determine sport
         for sport_key in SPORTS_CONFIG.keys():
             if league in SPORTS_CONFIG[sport_key]["leagues"]:
                 sport = sport_key
@@ -422,9 +330,7 @@ async def auto_scan_and_place_bets():
         if not sport or not SPORTS_CONFIG[sport]["enabled"]:
             continue
         
-        league_name = SPORTS_CONFIG[sport]["leagues"].get(league, {}).get("name", league)
-        logger.info(f"🔍 Scanning {sport.upper()} - {league_name}...")
-        sports_scanned[sport] += 1
+        logger.info(f"Scanning {sport.upper()} - {league}...")
         
         picks = []
         for match_data in matches:
@@ -436,7 +342,6 @@ async def auto_scan_and_place_bets():
                 "match": match_data["match"],
                 "sport": sport,
                 "league": league,
-                "league_name": league_name,
                 "home": match_data.get("home", ""),
                 "away": match_data.get("away", ""),
                 "odds": odds,
@@ -460,12 +365,113 @@ async def auto_scan_and_place_bets():
                 storage.add_pick(pick)
                 total_placed += 1
     
-    msg = f"""
-🤖 *AUTO SCAN COMPLETE - COMPREHENSIVE COVERAGE*
+    msg = f"AUTO SCAN COMPLETE - Total picks: {total_placed}\nNext settle in 60 minutes..."
+    await storage.send_telegram(msg)
+    logger.info(f"AUTO PLACED {total_placed} BETS")
 
-⚽ Football leagues scanned: {sports_scanned['football']}
-🏀 Basketball leagues scanned: {sports_scanned['basketball']}
-🎾 Tennis tournaments scanned: {sports_scanned['tennis']}
+async def auto_settle_and_report():
+    logger.info("=" * 80)
+    logger.info("AUTO SETTLE & REPORT")
+    logger.info("=" * 80)
+    
+    open_count = len([p for p in storage.picks if p.get("status") == "OPEN"])
+    
+    if open_count == 0:
+        logger.info("No open picks to settle")
+        return
+    
+    storage.auto_settle_picks()
+    stats = storage.get_stats()
+    
+    msg = f"REPORT - Wins: {stats['wins']}, Losses: {stats['losses']}, Profit: ${stats['profit']:+.2f}"
+    await storage.send_telegram(msg)
+    logger.info(f"REPORT SENT")
 
-Total picks placed: {total_placed}
-Total stake
+async def auto_hourly_status():
+    stats = storage.get_stats()
+    open_picks = len([p for p in storage.picks if p.get("status") == "OPEN"])
+    
+    msg = f"STATUS - Open: {open_picks}, Profit: ${stats['profit']:+.2f}"
+    await storage.send_telegram(msg)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = "BOT RUNNING - AUTO MODE ACTIVE"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats = storage.get_stats()
+    msg = f"Stats: {stats['total_picks']} bets, {stats['wins']} wins, Profit: ${stats['profit']:+.2f}"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = "/start - Info\n/stats - Statistics\n/help - Help"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STARTUP & SHUTDOWN
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def post_init(app):
+    storage.set_app(app)
+    
+    try:
+        await init_hermes()
+        logger.info("Hermes initialized")
+    except Exception as e:
+        logger.error(f"Hermes error: {e}")
+    
+    if not scheduler.running:
+        scheduler.start()
+        
+        scheduler.add_job(auto_scan_and_place_bets, 'cron', hour='*/1', minute=0)
+        scheduler.add_job(auto_settle_and_report, 'cron', hour='*/1', minute=30)
+        scheduler.add_job(auto_hourly_status, 'cron', hour='*', minute=45)
+        
+        logger.info("Scheduler started")
+        await auto_scan_and_place_bets()
+    
+    msg = "BOT STARTED - COMPREHENSIVE SPORTS COVERAGE"
+    try:
+        await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+    except:
+        pass
+
+async def post_stop(app):
+    try:
+        await shutdown_hermes()
+        logger.info("Hermes shutdown")
+    except Exception as e:
+        logger.error(f"Hermes stop error: {e}")
+    
+    if scheduler.running:
+        scheduler.shutdown()
+        logger.info("Scheduler stopped")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main():
+    logger.info("=" * 80)
+    logger.info("BETTING BOT - FULLY AUTOMATIC VERSION")
+    logger.info("COVERAGE: Football (16 leagues) + Basketball (10 leagues) + Tennis (13 tournaments)")
+    logger.info("=" * 80)
+    
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    app.post_init = post_init
+    app.post_stop = post_stop
+    
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("help", cmd_help))
+    
+    logger.info("Starting bot...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
