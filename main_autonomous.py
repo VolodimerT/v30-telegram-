@@ -1,4 +1,4 @@
-"""
+ """
 main_autonomous.py - HYBRID BETTING BOT WITH EXPANDED MARKETS
 БОТ анализирует автоматически → Уведомляет в ТГ → Ты ставишь вручную → БОТ отслеживает результат
 """
