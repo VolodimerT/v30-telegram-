@@ -159,7 +159,7 @@ async def fetch_picks() -> list:
                     f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
                     params={
                         "apiKey": ODDS_KEY,
-                        "regions": "eu,uk",
+                        "regions": "us,eu,uk,au",
                         "markets": ",".join(ALLOWED_MARKETS),
                     },
                     timeout=10.0,
@@ -515,3 +515,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
