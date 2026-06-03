@@ -126,7 +126,7 @@ SPORT_CONF = {
     "default":     {"default": 0.51},
 }
 
-ALLOWED_MARKETS = ("h2h", "spreads", "totals", "btts")
+ALLOWED_MARKETS = ("h2h", "spreads", "totals")
 
 
 def _conf_for(sport_key: str, market_key: str) -> float:
@@ -515,4 +515,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+    
