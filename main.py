@@ -1,6 +1,6 @@
 """
-Betting Bot — Final Hybrid v12.0
-Market-specific thresholds + All regions + No BTTS
+Betting Bot v12.1 — Final
+Market-balanced picks distribution
 """
 import os, json, logging, asyncio
 from datetime import datetime, timezone
@@ -17,14 +17,9 @@ CHAT_ID    = int(os.getenv("CHAT_ID", "0")) or None
 ODDS_KEY   = os.getenv("ODDS_API_KEY", "")
 UTC        = timezone.utc
 
-# ── Bank ──────────────────────────────────────────────────────────────────────
 INITIAL_BANK = 1000.0
-
-# ── Kelly ─────────────────────────────────────────────────────────────────────
 KELLY_FRACTION = 0.25
 
-# ── Market-specific thresholds ────────────────────────────────────────────────
-# (odds_min, odds_max, min_ev, min_kelly, min_conf)
 TIERS_BY_MARKET = {
     "h2h": [
         (1.50, 2.00, 0.08, 0.010, 0.55),
@@ -43,7 +38,6 @@ TIERS_BY_MARKET = {
     ],
 }
 
-# ── Sport/Market confidence calibration ───────────────────────────────────────
 SPORT_CONF = {
     "soccer":           {"h2h": 0.52, "spreads": 0.51, "totals": 0.52},
     "basketball":       {"h2h": 0.53, "spreads": 0.52, "totals": 0.53},
@@ -60,17 +54,12 @@ SPORT_CONF = {
 
 ALLOWED_MARKETS = ("h2h", "spreads", "totals")
 
-# ── In-memory state ───────────────────────────────────────────────────────────
 _pending: dict   = {}
 _open_bets: dict = {}
 _results: list   = []
 _bet_counter     = 0
 _bank            = INITIAL_BANK
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _settled_count():
     return len(_results)
@@ -119,10 +108,6 @@ def _passes(odds: float, conf: float, market: str):
     return True, f"EV={ev:.3f} Kelly={kelly*100:.1f}% conf={conf:.0%}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# KEYBOARDS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _kb_pick(mid: int, stake: float):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(f"✅ ACCEPT  {int(stake)} UAH", callback_data=f"acc:{mid}:{int(stake)}"),
@@ -144,13 +129,9 @@ def _kb_done(label: str):
     ]])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ODDS API
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_picks() -> list:
     if not ODDS_KEY:
-        logger.warning("No ODDS_API_KEY — returning empty list")
+        logger.warning("No ODDS_API_KEY")
         return []
 
     picks = []
@@ -159,7 +140,7 @@ async def fetch_picks() -> list:
         r = await client.get("https://api.the-odds-api.com/v4/sports",
                              params={"apiKey": ODDS_KEY})
         if r.status_code != 200:
-            logger.error(f"Sports list error: {r.status_code}")
+            logger.error(f"Sports error: {r.status_code}")
             return []
 
         active = [s["key"] for s in r.json() if s.get("active")]
@@ -214,59 +195,63 @@ async def fetch_picks() -> list:
                             "kelly":     kelly,
                         })
 
-    logger.info(f"Total raw picks: {len(picks)}  Markets: {mkt_counts}")
+    logger.info(f"Raw: {len(picks)}  Markets: {mkt_counts}")
     return picks
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SCAN
-# ─────────────────────────────────────────────────────────────────────────────
-
-MAX_PICKS = 30
 
 async def scan(app=None):
     global _bank
     logger.info("🔍 SCAN START")
     raw = await fetch_picks()
 
-    passed, skipped = [], []
+    passed = []
+    skipped_count = 0
     for p in raw:
         ok, reason = _passes(p["odds"], p["conf"], p["market"])
         if ok:
-            passed.append((p, reason))
+            passed.append(p)
         else:
-            skipped.append((p, reason))
+            skipped_count += 1
 
-    logger.info(f"Passed: {len(passed)}  Skipped: {len(skipped)}")
+    logger.info(f"Passed: {len(passed)}  Skipped: {skipped_count}")
 
     if not passed:
-        msg = (f"🔍 Scan complete: 0 picks passed\n"
-               f"Skipped {len(skipped)} | Bank: {_bank:.0f} UAH")
+        msg = f"🔍 Scan: 0 picks passed | Bank: {_bank:.0f} UAH"
         if app and CHAT_ID:
             await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-        logger.info("🔍 SCAN DONE — 0 picks")
         return
 
-    # Sort by EV descending, take top MAX_PICKS
-    passed.sort(key=lambda x: x[0]["ev"], reverse=True)
-    top = passed[:MAX_PICKS]
+    # GROUP BY MARKET and SORT each group by EV
+    by_market = {"h2h": [], "spreads": [], "totals": []}
+    for p in passed:
+        mk = p["market"]
+        if mk in by_market:
+            by_market[mk].append(p)
+
+    # Sort each market by EV desc
+    for mk in by_market:
+        by_market[mk].sort(key=lambda x: x["ev"], reverse=True)
+
+    # Take balanced: h2h=15, spreads=8, totals=7
+    limits = {"h2h": 15, "spreads": 8, "totals": 7}
+    top = []
+    for mk in ["h2h", "spreads", "totals"]:
+        top.extend(by_market[mk][:limits[mk]])
 
     mkt_dist = {}
-    for p, _ in top:
+    for p in top:
         mkt_dist[p["market"]] = mkt_dist.get(p["market"], 0) + 1
 
     mkt_str = "  ".join(f"{k}={v}" for k, v in mkt_dist.items())
     header = (
         f"📊 Scan {datetime.now(UTC).strftime('%d %b %H:%M')} UTC\n"
-        f"Picks: {len(top)} passed / {len(skipped)} filtered\n"
-        f"Markets: {mkt_str}  Bank: {_bank:.0f} UAH"
+        f"Picks: {len(top)} ({mkt_str})  Bank: {_bank:.0f} UAH"
     )
     if app and CHAT_ID:
         await app.bot.send_message(chat_id=CHAT_ID, text=header)
 
-    for p, reason in top:
-        ev, kelly = _calc(p["conf"], p["odds"])
-        stake = _stake(kelly)
+    for p in top:
+        stake = _stake(p["kelly"])
         p["stake"] = stake
         mid = id(p) & 0xFFFFFF
         _pending[mid] = p
@@ -278,7 +263,7 @@ async def scan(app=None):
             f"{p['match']}\n"
             f"{market_label}: {p['selection']}\n\n"
             f"Odds: {p['odds']}  Conf: {p['conf']:.0%}\n"
-            f"EV: {ev:+.3f}   Kelly: {kelly*100:.1f}%\n"
+            f"EV: {p['ev']:+.3f}   Kelly: {p['kelly']*100:.1f}%\n"
             f"Stake: {int(stake)} UAH"
         )
         if app and CHAT_ID:
@@ -289,10 +274,6 @@ async def scan(app=None):
 
     logger.info("🔍 SCAN DONE")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CALLBACK
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _bank, _bet_counter
@@ -315,7 +296,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("Pick expired. Run /scan.")
             return
         try:
-            await q.message.edit_reply_markup(reply_markup=_kb_done(f"Accepted {int(stake)} UAH"))
+            await q.message.edit_reply_markup(reply_markup=_kb_done(f"✅ {int(stake)} UAH"))
         except Exception:
             pass
         _bet_counter += 1
@@ -324,11 +305,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            "placed_at": datetime.now(UTC).isoformat(),
                            "status": "OPEN"}
         await q.message.reply_text(
-            f"✅ Bet #{bid} registered\n"
-            f"{info['match']}\n"
+            f"✅ Bet #{bid}\n{info['match']}\n"
             f"{info['market'].upper()}: {info['selection']}\n"
-            f"Odds: {info['odds']}  Stake: {int(stake)} UAH\n\n"
-            f"Settle when done:",
+            f"Odds: {info['odds']}  Stake: {int(stake)} UAH",
             reply_markup=_kb_settle(bid),
         )
         return
@@ -346,7 +325,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bid = int(data.split(":")[1])
         bet = _open_bets.get(bid)
         if not bet:
-            await q.message.reply_text("Bet not found.")
             return
         profit = round((bet["odds"] - 1.0) * bet["stake"], 2)
         _bank += profit
@@ -357,17 +335,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.edit_reply_markup(reply_markup=_kb_done(f"WIN +{profit} UAH"))
         except Exception:
             pass
-        await q.message.reply_text(
-            f"🏆 WIN — Bet #{bid}\n{bet['match']}\n"
-            f"Profit: +{profit} UAH\nBank: {_bank:.0f} UAH"
-        )
+        await q.message.reply_text(f"🏆 WIN #{bid}\nProfit: +{profit} UAH\nBank: {_bank:.0f} UAH")
         return
 
     if data.startswith("loss:"):
         bid = int(data.split(":")[1])
         bet = _open_bets.get(bid)
         if not bet:
-            await q.message.reply_text("Bet not found.")
             return
         loss = -round(bet["stake"], 2)
         _bank += loss
@@ -378,10 +352,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.edit_reply_markup(reply_markup=_kb_done(f"LOSS {loss} UAH"))
         except Exception:
             pass
-        await q.message.reply_text(
-            f"❌ LOSS — Bet #{bid}\n{bet['match']}\n"
-            f"Loss: {loss} UAH\nBank: {_bank:.0f} UAH"
-        )
+        await q.message.reply_text(f"❌ LOSS #{bid}\nLoss: {loss} UAH\nBank: {_bank:.0f} UAH")
         return
 
     if data.startswith("pend:"):
@@ -392,19 +363,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COMMANDS
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Betting Bot v12.0*\n\n"
+        "🤖 *Betting Bot v12.1*\n\n"
         "Commands:\n"
-        "/scan — run scan now\n"
-        "/stats — performance stats\n"
-        "/bank — current bankroll\n"
-        "/bets — open bets\n"
-        "/help — this message",
+        "/scan — run scan\n"
+        "/stats — stats\n"
+        "/bank — bankroll\n"
+        "/bets — open bets",
         parse_mode="Markdown",
     )
 
@@ -417,7 +383,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     n = len(_results)
     if n == 0:
-        await update.message.reply_text("No settled bets yet.")
+        await update.message.reply_text("No bets settled yet.")
         return
     wins   = sum(1 for r in _results if r["result"] == "WON")
     profit = sum(r["profit"] for r in _results)
@@ -434,27 +400,25 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mkt_stats[mk]["profit"] += r["profit"]
 
     mkt_lines = "\n".join(
-        f"  {mk}: {v['n']} bets | WR {v['wins']/v['n']*100:.0f}% | P&L {v['profit']:+.0f}"
+        f"  {mk}: {v['n']} | WR {v['wins']/v['n']*100:.0f}% | {v['profit']:+.0f}"
         for mk, v in mkt_stats.items()
     )
 
     await update.message.reply_text(
         f"📊 *Stats*\n"
-        f"Settled: {n}  Wins: {wins}  WR: {wins/n*100:.1f}%\n"
+        f"Settled: {n} | WR: {wins/n*100:.0f}% | ROI: {roi:+.1f}%\n"
         f"Profit: {profit:+.0f} UAH\n"
-        f"ROI: {roi:+.1f}%\n"
         f"Bank: {_bank:.0f} UAH\n\n"
-        f"*By market:*\n{mkt_lines}",
+        f"{mkt_lines}",
         parse_mode="Markdown",
     )
 
 
 async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"💰 Bank: *{_bank:.0f} UAH*\n"
-        f"Initial: {INITIAL_BANK:.0f} UAH\n"
-        f"P&L: {_bank - INITIAL_BANK:+.0f} UAH\n"
-        f"Settled bets: {_settled_count()}",
+        f"💰 *{_bank:.0f} UAH*\n"
+        f"P&L: {_bank - INITIAL_BANK:+.0f}\n"
+        f"Settled: {_settled_count()}",
         parse_mode="Markdown",
     )
 
@@ -464,22 +428,15 @@ async def cmd_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not open_b:
         await update.message.reply_text("No open bets.")
         return
-    lines = [f"*Open bets ({len(open_b)})*"]
+    lines = [f"*Open ({len(open_b)})*"]
     for b in open_b:
-        lines.append(
-            f"#{b['id']} {b['match']} | {b['market'].upper()} {b['selection']} | "
-            f"@{b['odds']} stake {b['stake']:.0f} UAH"
-        )
+        lines.append(f"#{b['id']} {b['match'][:30]} | {b['selection'][:15]} @{b['odds']}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cmd_start(update, context)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STARTUP
-# ─────────────────────────────────────────────────────────────────────────────
 
 scheduler = AsyncIOScheduler()
 
@@ -489,16 +446,11 @@ async def post_init(app):
     scheduler.start()
     scheduler.add_job(scan, "cron", hour=8, minute=0,
                       kwargs={"app": app}, id="daily_scan")
-    logger.info("Scheduler started — daily scan @ 08:00 UTC")
+    logger.info("Scheduler: daily scan @ 08:00 UTC")
     try:
         await app.bot.send_message(
             chat_id=CHAT_ID,
-            text=(
-                f"✅ Betting Bot v12.0 started\n"
-                f"Bank: {INITIAL_BANK:.0f} UAH\n"
-                f"Markets: h2h, spreads, totals\n"
-                f"Regions: us, eu, uk, au"
-            )
+            text="✅ Bot v12.1 started\nMarkets: h2h (15) + spreads (8) + totals (7)"
         )
     except Exception:
         pass
@@ -532,3 +484,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
