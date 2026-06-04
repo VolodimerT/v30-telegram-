@@ -189,6 +189,7 @@ async def fetch_picks() -> list:
                             "sport":     sport_key,
                             "market":    mk,
                             "selection": name,
+                            "point":      outcome.get("point"),
                             "odds":      odds,
                             "conf":      conf,
                             "ev":        ev,
@@ -258,10 +259,11 @@ async def scan(app=None):
 
         sport_label = p["sport"].upper().replace("_", " ")
         market_label = p["market"].upper()
+        point_str = f" {p['point']}" if p.get('point') else ""
         text = (
             f"🏟 {sport_label}\n"
             f"{p['match']}\n"
-            f"{market_label}: {p['selection']}\n\n"
+            f"{market_label}: {p['selection']}{point_str}\n\n"
             f"Odds: {p['odds']}  Conf: {p['conf']:.0%}\n"
             f"EV: {p['ev']:+.3f}   Kelly: {p['kelly']*100:.1f}%\n"
             f"Stake: {int(stake)} UAH"
