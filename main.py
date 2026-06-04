@@ -1,6 +1,6 @@
 """
-Betting Bot v12.1 — Final
-Market-balanced picks distribution
+Betting Bot v13.0 — Final
+All markets per match + copyable list for Perplexity
 """
 import os, json, logging, asyncio
 from datetime import datetime, timezone
@@ -93,25 +93,21 @@ def _stake(kelly: float):
 
 def _passes(odds: float, conf: float, market: str):
     if not (1.50 <= odds <= 5.00):
-        return False, "odds out of range"
+        return False
     tier = _get_tier(odds, market)
     if tier is None:
-        return False, "odds out of range"
+        return False
     min_ev, min_kelly, min_conf = tier
     ev, kelly = _calc(conf, odds)
-    if conf < min_conf:
-        return False, f"conf {conf:.0%} < {min_conf:.0%}"
-    if ev < min_ev:
-        return False, f"EV {ev:.3f} < {min_ev}"
-    if kelly < min_kelly:
-        return False, f"Kelly {kelly*100:.1f}% < {min_kelly*100:.1f}%"
-    return True, f"EV={ev:.3f} Kelly={kelly*100:.1f}% conf={conf:.0%}"
+    if conf < min_conf or ev < min_ev or kelly < min_kelly:
+        return False
+    return True
 
 
-def _kb_pick(mid: int, stake: float):
+def _kb_accept_skip(mid: str):
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"✅ ACCEPT  {int(stake)} UAH", callback_data=f"acc:{mid}:{int(stake)}"),
-        InlineKeyboardButton("❌ SKIP",                     callback_data=f"skip:{mid}"),
+        InlineKeyboardButton("✅ ACCEPT", callback_data=f"acc:{mid}"),
+        InlineKeyboardButton("❌ SKIP",   callback_data=f"skip:{mid}"),
     ]])
 
 
@@ -129,19 +125,18 @@ def _kb_done(label: str):
     ]])
 
 
-async def fetch_picks() -> list:
+async def fetch_picks() -> dict:
+    """Return dict: match_name -> list of pick options"""
     if not ODDS_KEY:
-        logger.warning("No ODDS_API_KEY")
-        return []
+        return {}
 
-    picks = []
-    mkt_counts = {}
+    matches = {}  # match_name -> {sport, options: []}
+    
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.get("https://api.the-odds-api.com/v4/sports",
                              params={"apiKey": ODDS_KEY})
         if r.status_code != 200:
-            logger.error(f"Sports error: {r.status_code}")
-            return []
+            return {}
 
         active = [s["key"] for s in r.json() if s.get("active")]
         logger.info(f"Active sports: {len(active)}")
@@ -170,6 +165,10 @@ async def fetch_picks() -> list:
                 if not home or not away:
                     continue
                 match_name = f"{home} vs {away}"
+                
+                if match_name not in matches:
+                    matches[match_name] = {"sport": sport_key, "options": []}
+
                 bks = event.get("bookmakers", [])
                 if not bks:
                     continue
@@ -178,101 +177,110 @@ async def fetch_picks() -> list:
                     mk = market.get("key", "")
                     if mk not in ALLOWED_MARKETS:
                         continue
-                    mkt_counts[mk] = mkt_counts.get(mk, 0) + 1
                     conf = _conf_for(sport_key, mk)
+                    
                     for outcome in market.get("outcomes", []):
                         odds = outcome.get("price", 0.0)
                         name = outcome.get("name", "")
+                        point = outcome.get("point")
+                        
+                        if not _passes(odds, conf, mk):
+                            continue
+                        
                         ev, kelly = _calc(conf, odds)
-                        picks.append({
-                            "match":     match_name,
-                            "sport":     sport_key,
+                        
+                        # Format selection name with point if present
+                        if point:
+                            sel_name = f"{name} {point:+.1f}" if isinstance(point, float) else f"{name} {point}"
+                        else:
+                            sel_name = name
+                        
+                        matches[match_name]["options"].append({
                             "market":    mk,
-                            "selection": name,
-                            "point":      outcome.get("point"),
+                            "selection": sel_name,
                             "odds":      odds,
                             "conf":      conf,
                             "ev":        ev,
                             "kelly":     kelly,
                         })
 
-    logger.info(f"Raw: {len(picks)}  Markets: {mkt_counts}")
-    return picks
+    logger.info(f"Loaded {len(matches)} matches with options")
+    return matches
 
 
 async def scan(app=None):
     global _bank
     logger.info("🔍 SCAN START")
-    raw = await fetch_picks()
+    matches = await fetch_picks()
 
-    passed = []
-    skipped_count = 0
-    for p in raw:
-        ok, reason = _passes(p["odds"], p["conf"], p["market"])
-        if ok:
-            passed.append(p)
-        else:
-            skipped_count += 1
-
-    logger.info(f"Passed: {len(passed)}  Skipped: {skipped_count}")
-
-    if not passed:
-        msg = f"🔍 Scan: 0 picks passed | Bank: {_bank:.0f} UAH"
+    if not matches:
+        msg = f"🔍 Scan: no picks found | Bank: {_bank:.0f} UAH"
         if app and CHAT_ID:
             await app.bot.send_message(chat_id=CHAT_ID, text=msg)
         return
 
-    # GROUP BY MARKET and SORT each group by EV
-    by_market = {"h2h": [], "spreads": [], "totals": []}
-    for p in passed:
-        mk = p["market"]
-        if mk in by_market:
-            by_market[mk].append(p)
+    logger.info(f"Passed: {sum(len(m['options']) for m in matches.values())}  Matches: {len(matches)}")
 
-    # Sort each market by EV desc
-    for mk in by_market:
-        by_market[mk].sort(key=lambda x: x["ev"], reverse=True)
-
-    # Take balanced: h2h=15, spreads=8, totals=7
-    limits = {"h2h": 15, "spreads": 8, "totals": 7}
-    top = []
-    for mk in ["h2h", "spreads", "totals"]:
-        top.extend(by_market[mk][:limits[mk]])
-
-    mkt_dist = {}
-    for p in top:
-        mkt_dist[p["market"]] = mkt_dist.get(p["market"], 0) + 1
-
-    mkt_str = "  ".join(f"{k}={v}" for k, v in mkt_dist.items())
+    # Send header
     header = (
         f"📊 Scan {datetime.now(UTC).strftime('%d %b %H:%M')} UTC\n"
-        f"Picks: {len(top)} ({mkt_str})  Bank: {_bank:.0f} UAH"
+        f"Matches: {len(matches)}  Bank: {_bank:.0f} UAH\n\n"
+        f"📋 COPYABLE LIST FOR PERPLEXITY:\n"
     )
-    if app and CHAT_ID:
-        await app.bot.send_message(chat_id=CHAT_ID, text=header)
-
-    for p in top:
-        stake = _stake(p["kelly"])
-        p["stake"] = stake
-        mid = id(p) & 0xFFFFFF
-        _pending[mid] = p
-
-        sport_label = p["sport"].upper().replace("_", " ")
-        market_label = p["market"].upper()
-        point_str = f" {p['point']}" if p.get('point') else ""
-        text = (
-            f"🏟 {sport_label}\n"
-            f"{p['match']}\n"
-            f"{market_label}: {p['selection']}{point_str}\n\n"
-            f"Odds: {p['odds']}  Conf: {p['conf']:.0%}\n"
-            f"EV: {p['ev']:+.3f}   Kelly: {p['kelly']*100:.1f}%\n"
-            f"Stake: {int(stake)} UAH"
-        )
+    
+    # Build copyable list
+    copy_list = []
+    for match_name, data in sorted(matches.items()):
+        for opt in sorted(data["options"], key=lambda x: x["ev"], reverse=True):
+            line = (
+                f"{match_name} - {opt['market'].upper()}: {opt['selection']} @ {opt['odds']} | "
+                f"EV {opt['ev']:+.3f} | Kelly {opt['kelly']*100:.1f}%"
+            )
+            copy_list.append(line)
+    
+    if copy_list:
+        if app and CHAT_ID:
+            # Send header with copyable list
+            msg = header + "\n".join(copy_list)
+            if len(msg) > 4000:  # Telegram limit
+                # Split into chunks
+                chunks = []
+                current = header
+                for line in copy_list:
+                    if len(current) + len(line) + 1 > 3900:
+                        chunks.append(current)
+                        current = line
+                    else:
+                        current += "\n" + line
+                if current:
+                    chunks.append(current)
+                for chunk in chunks:
+                    await app.bot.send_message(chat_id=CHAT_ID, text=chunk)
+            else:
+                await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+    
+    # Now send formatted picks with ACCEPT/SKIP buttons
+    msg_count = 0
+    for match_name, data in sorted(matches.items()):
+        sport_label = data["sport"].upper().replace("_", " ")
+        text = f"🏟 {sport_label}\n{match_name}\n\n"
+        
+        for opt in sorted(data["options"], key=lambda x: x["ev"], reverse=True):
+            text += (
+                f"{opt['market'].upper()}: {opt['selection']}\n"
+                f"  Odds {opt['odds']} | Conf {opt['conf']:.0%} | "
+                f"EV {opt['ev']:+.3f} | Kelly {opt['kelly']*100:.1f}%\n\n"
+            )
+        
+        mid = f"{match_name}_{msg_count}"
+        _pending[mid] = {"match": match_name, "data": data, "sport": sport_label}
+        
         if app and CHAT_ID:
             await app.bot.send_message(
                 chat_id=CHAT_ID, text=text,
-                reply_markup=_kb_pick(mid, stake)
+                reply_markup=_kb_accept_skip(mid)
             )
+        msg_count += 1
 
     logger.info("🔍 SCAN DONE")
 
@@ -290,32 +298,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("acc:"):
-        parts = data.split(":")
-        mid   = int(parts[1])
-        stake = float(parts[2])
-        info  = _pending.pop(mid, None)
+        mid = data.split(":")[1]
+        info = _pending.pop(mid, None)
         if not info:
-            await q.message.reply_text("Pick expired. Run /scan.")
+            await q.message.reply_text("Expired. Run /scan.")
             return
         try:
-            await q.message.edit_reply_markup(reply_markup=_kb_done(f"✅ {int(stake)} UAH"))
+            await q.message.edit_reply_markup(reply_markup=_kb_done("✅ PENDING ANALYSIS"))
         except Exception:
             pass
-        _bet_counter += 1
-        bid = _bet_counter
-        _open_bets[bid] = {**info, "id": bid,
-                           "placed_at": datetime.now(UTC).isoformat(),
-                           "status": "OPEN"}
-        await q.message.reply_text(
-            f"✅ Bet #{bid}\n{info['match']}\n"
-            f"{info['market'].upper()}: {info['selection']}\n"
-            f"Odds: {info['odds']}  Stake: {int(stake)} UAH",
-            reply_markup=_kb_settle(bid),
-        )
         return
 
     if data.startswith("skip:"):
-        mid = int(data.split(":")[1])
+        mid = data.split(":")[1]
         _pending.pop(mid, None)
         try:
             await q.message.edit_reply_markup(reply_markup=_kb_done("Skipped"))
@@ -367,12 +362,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Betting Bot v12.1*\n\n"
-        "Commands:\n"
-        "/scan — run scan\n"
-        "/stats — stats\n"
-        "/bank — bankroll\n"
-        "/bets — open bets",
+        "🤖 *Bot v13.0*\nAll markets + Perplexity analysis\n\n"
+        "/scan, /stats, /bank, /bets, /help",
         parse_mode="Markdown",
     )
 
@@ -385,42 +376,20 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     n = len(_results)
     if n == 0:
-        await update.message.reply_text("No bets settled yet.")
+        await update.message.reply_text("No bets yet.")
         return
-    wins   = sum(1 for r in _results if r["result"] == "WON")
+    wins = sum(1 for r in _results if r["result"] == "WON")
     profit = sum(r["profit"] for r in _results)
-    staked = sum(r["stake"] for r in _results)
-    roi    = profit / staked * 100 if staked else 0
-
-    mkt_stats = {}
-    for r in _results:
-        mk = r.get("market", "h2h")
-        if mk not in mkt_stats:
-            mkt_stats[mk] = {"n": 0, "wins": 0, "profit": 0}
-        mkt_stats[mk]["n"] += 1
-        mkt_stats[mk]["wins"] += 1 if r["result"] == "WON" else 0
-        mkt_stats[mk]["profit"] += r["profit"]
-
-    mkt_lines = "\n".join(
-        f"  {mk}: {v['n']} | WR {v['wins']/v['n']*100:.0f}% | {v['profit']:+.0f}"
-        for mk, v in mkt_stats.items()
-    )
-
+    roi = profit / sum(r["stake"] for r in _results) * 100 if n else 0
     await update.message.reply_text(
-        f"📊 *Stats*\n"
-        f"Settled: {n} | WR: {wins/n*100:.0f}% | ROI: {roi:+.1f}%\n"
-        f"Profit: {profit:+.0f} UAH\n"
-        f"Bank: {_bank:.0f} UAH\n\n"
-        f"{mkt_lines}",
+        f"📊 *Stats*\nSettled: {n} | WR: {wins/n*100:.0f}% | ROI: {roi:+.1f}%\nProfit: {profit:+.0f} UAH\nBank: {_bank:.0f} UAH",
         parse_mode="Markdown",
     )
 
 
 async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"💰 *{_bank:.0f} UAH*\n"
-        f"P&L: {_bank - INITIAL_BANK:+.0f}\n"
-        f"Settled: {_settled_count()}",
+        f"💰 *{_bank:.0f} UAH*\nP&L: {_bank - INITIAL_BANK:+.0f}\nSettled: {_settled_count()}",
         parse_mode="Markdown",
     )
 
@@ -431,8 +400,8 @@ async def cmd_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No open bets.")
         return
     lines = [f"*Open ({len(open_b)})*"]
-    for b in open_b:
-        lines.append(f"#{b['id']} {b['match'][:30]} | {b['selection'][:15]} @{b['odds']}")
+    for b in open_b[:10]:
+        lines.append(f"#{b['id']} {b['match'][:25]} @{b['odds']}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -444,16 +413,12 @@ scheduler = AsyncIOScheduler()
 
 
 async def post_init(app):
-    logger.info("Bot initializing…")
+    logger.info("Bot init…")
     scheduler.start()
-    scheduler.add_job(scan, "cron", hour=8, minute=0,
-                      kwargs={"app": app}, id="daily_scan")
-    logger.info("Scheduler: daily scan @ 08:00 UTC")
+    scheduler.add_job(scan, "cron", hour=8, minute=0, kwargs={"app": app}, id="daily_scan")
+    logger.info("Daily scan @ 08:00 UTC")
     try:
-        await app.bot.send_message(
-            chat_id=CHAT_ID,
-            text="✅ Bot v12.1 started\nMarkets: h2h (15) + spreads (8) + totals (7)"
-        )
+        await app.bot.send_message(chat_id=CHAT_ID, text="✅ Bot v13.0 started\nAll markets + copyable list")
     except Exception:
         pass
     await scan(app)
@@ -467,11 +432,9 @@ async def post_stop(app):
 def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
-
     app = Application.builder().token(TOKEN).build()
     app.post_init = post_init
     app.post_stop = post_stop
-
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("scan",  cmd_scan))
@@ -479,7 +442,6 @@ def main():
     app.add_handler(CommandHandler("bank",  cmd_bank))
     app.add_handler(CommandHandler("bets",  cmd_bets))
     app.add_handler(CommandHandler("help",  cmd_help))
-
     logger.info("🚀 Polling…")
     app.run_polling(drop_pending_updates=True)
 
