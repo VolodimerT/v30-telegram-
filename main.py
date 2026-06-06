@@ -25,6 +25,8 @@ Optional:
 
 from __future__ import annotations
 
+print("BOOT: main.py imported", flush=True)
+
 import asyncio
 import json
 import logging
@@ -41,10 +43,11 @@ from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 # ---------- Logging ----------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logger = logging.getLogger("betting-bot-v14")
+print("BOOT: logging configured", flush=True)
 
 # ---------- ENV ----------
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -547,7 +550,4 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("acc:"):
         sid = data.split(":", 1)[1]
         selection = _pending.pop(sid, None)
-        if not selection:
-            await q.message.reply_text("Expired. Run /scan again.")
-            return
-        be
+        if not selec
