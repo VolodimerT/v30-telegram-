@@ -1,70 +1,74 @@
 """
-Betting Telegram Bot v14 HOTFIX — anti-spam + persistent log
-
-What this fixes:
-- NO scan on startup by default.
-- NO scanning all 48 sports: strict whitelist only.
-- NO long callback_data: short UUID ids only.
-- NO message flood: Top-N candidates only + safe_send with rate-limit handling.
-- ACCEPT now creates a real OPEN bet in data/state.json.
-- /settle supports win/loss/push and updates bank.
-
-ENV required:
-- TELEGRAM_BOT_TOKEN
-- ODDS_API_KEY
-Optional:
-- CHAT_ID
-- DATA_FILE=/app/data/state.json
-- INITIAL_BANK=1019.98
-- MAX_MATCHES_TO_SEND=10
-- MAX_OPTIONS_PER_MATCH=2
-- DAILY_SCAN_ENABLED=false
-- DAILY_SCAN_HOUR_UTC=8
-- ALLOWED_SPORTS=basketball_nba,basketball_wnba,icehockey_nhl,tennis_atp_french_open,tennis_wta_french_open
+Betting Bot RECOVERY — based on last working v8.0 file.
+Purpose:
+- Restore Telegram polling reliably on Railway.
+- No scan spam on startup by default.
+- Uses /scan manually.
+- Uses Railway venv via railway_start.sh.
 """
 
 from __future__ import annotations
 
-print("BOOT: main.py imported", flush=True)
+print("BOOT: recovery main.py imported", flush=True)
 
-import asyncio
+import os
 import json
 import logging
-import os
-import uuid
+import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, ContextTypes, CommandHandler, CallbackQueryHandler
 
-# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
-logger = logging.getLogger("betting-bot-v14")
-print("BOOT: logging configured", flush=True)
-
-# ---------- ENV ----------
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-ODDS_KEY = os.getenv("ODDS_API_KEY", "").strip()
-CHAT_ID_RAW = os.getenv("CHAT_ID", "").strip()
-CHAT_ID: Optional[int] = int(CHAT_ID_RAW) if CHAT_ID_RAW.lstrip("-").isdigit() else None
+logger = logging.getLogger("betting-bot-recovery")
 
 UTC = timezone.utc
-DATA_FILE = Path(os.getenv("DATA_FILE", "/app/data/state.json"))
-INITIAL_BANK = float(os.getenv("INITIAL_BANK", "1019.98"))
 
-MAX_MATCHES_TO_SEND = int(os.getenv("MAX_MATCHES_TO_SEND", "10"))
-MAX_OPTIONS_PER_MATCH = int(os.getenv("MAX_OPTIONS_PER_MATCH", "2"))
-MAX_COPY_LINES = int(os.getenv("MAX_COPY_LINES", "30"))
-DAILY_SCAN_ENABLED = os.getenv("DAILY_SCAN_ENABLED", "false").lower() == "true"
-DAILY_SCAN_HOUR_UTC = int(os.getenv("DAILY_SCAN_HOUR_UTC", "8"))
-STARTUP_MESSAGE_ENABLED = os.getenv("STARTUP_MESSAGE_ENABLED", "false").lower() == "true"
+def env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw)
+    except Exception:
+        logger.warning("Bad int env %s=%r; using %s", name, raw, default)
+        return default
+
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return float(raw)
+    except Exception:
+        logger.warning("Bad float env %s=%r; using %s", name, raw, default)
+        return default
+
+def parse_chat_id(raw: str) -> Optional[int]:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        logger.warning("CHAT_ID is not int: %r", raw)
+        return None
+
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = parse_chat_id(os.getenv("CHAT_ID", ""))
+ODDS_KEY = os.getenv("ODDS_API_KEY", "").strip()
+
+INITIAL_BANK = env_float("INITIAL_BANK", 1019.98)
+DAILY_SCAN_ENABLED = env_bool("DAILY_SCAN_ENABLED", "false")
+STARTUP_MESSAGE_ENABLED = env_bool("STARTUP_MESSAGE_ENABLED", "false")
+DAILY_SCAN_HOUR_UTC = env_int("DAILY_SCAN_HOUR_UTC", 8)
+MAX_MATCHES_TO_SEND = env_int("MAX_MATCHES_TO_SEND", 10)
+MAX_OPTIONS_PER_MATCH = env_int("MAX_OPTIONS_PER_MATCH", 2)
 
 DEFAULT_ALLOWED_SPORTS = (
     "basketball_nba",
@@ -74,460 +78,259 @@ DEFAULT_ALLOWED_SPORTS = (
     "tennis_wta_french_open",
 )
 ALLOWED_SPORTS = {
-    s.strip() for s in os.getenv("ALLOWED_SPORTS", ",".join(DEFAULT_ALLOWED_SPORTS)).split(",") if s.strip()
+    s.strip()
+    for s in os.getenv("ALLOWED_SPORTS", ",".join(DEFAULT_ALLOWED_SPORTS)).split(",")
+    if s.strip()
 }
 
-BLOCKED_SPORT_KEY_PARTS = (
-    "winner",
-    "championship",
-    "super_bowl",
-    "politics",
-    "golf",
-)
+# Adaptive filter thresholds by odds tier
+TIERS = [
+    # (odds_min, odds_max, min_ev, min_kelly, min_conf)
+    (1.80, 2.00, 0.10, 0.02, 0.55),
+    (2.00, 3.00, 0.08, 0.015, 0.52),
+    (3.00, 5.01, 0.05, 0.01, 0.50),
+]
+
+KELLY_FRACTION = 0.25
+BOOTSTRAP_THRESHOLD = 100
+
+_pending: dict = {}
+_open_bets: dict = {}
+_results: list = []
+_bet_counter = 0
+_bank = INITIAL_BANK
+
+SPORT_CONF = {
+    "soccer": {"h2h": 0.52, "spreads": 0.51, "totals": 0.53, "btts": 0.52},
+    "basketball": {"h2h": 0.54, "spreads": 0.53, "totals": 0.54},
+    "tennis": {"h2h": 0.53, "spreads": 0.52, "totals": 0.52},
+    "mma": {"h2h": 0.51},
+    "baseball": {"h2h": 0.52, "totals": 0.52},
+    "hockey": {"h2h": 0.52, "totals": 0.53},
+    "icehockey": {"h2h": 0.52, "spreads": 0.51, "totals": 0.53},
+    "americanfootball": {"h2h": 0.53, "spreads": 0.54, "totals": 0.53},
+    "default": {"default": 0.51},
+}
 
 ALLOWED_MARKETS = ("h2h", "spreads", "totals")
 
-# ---------- Conservative scan model: rough ranking only, not final EV ----------
-KELLY_FRACTION = 0.15
-SPORT_CONF = {
-    "basketball": {"h2h": 0.53, "spreads": 0.52, "totals": 0.52},
-    "tennis": {"h2h": 0.52, "spreads": 0.51, "totals": 0.51},
-    "icehockey": {"h2h": 0.51, "spreads": 0.50, "totals": 0.51},
-    "default": {"h2h": 0.51, "spreads": 0.50, "totals": 0.50},
-}
 
-_pending: Dict[str, Dict[str, Any]] = {}
-scheduler = AsyncIOScheduler(timezone="UTC")
+def _settled_count() -> int:
+    return len(_results)
 
 
-# ---------- State ----------
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+def _get_tier(odds: float):
+    for lo, hi, min_ev, min_kelly, min_conf in TIERS:
+        if lo <= odds < hi:
+            return min_ev, min_kelly, min_conf
+    return None
 
 
-def _empty_state() -> Dict[str, Any]:
-    return {
-        "bank": INITIAL_BANK,
-        "mode": "TEST",
-        "next_bet_id": 1,
-        "open_bets": [],
-        "results": [],
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
-    }
-
-
-def load_state() -> Dict[str, Any]:
-    try:
-        if DATA_FILE.exists():
-            with DATA_FILE.open("r", encoding="utf-8") as f:
-                state = json.load(f)
-            state.setdefault("bank", INITIAL_BANK)
-            state.setdefault("mode", "TEST")
-            state.setdefault("next_bet_id", 1)
-            state.setdefault("open_bets", [])
-            state.setdefault("results", [])
-            return state
-    except Exception as e:
-        logger.exception("Failed to load state: %s", e)
-    return _empty_state()
-
-
-def save_state(state: Dict[str, Any]) -> None:
-    state["updated_at"] = _now_iso()
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = DATA_FILE.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    tmp.replace(DATA_FILE)
-
-
-def get_bank() -> float:
-    return float(load_state().get("bank", INITIAL_BANK))
-
-
-def create_open_bet(selection: Dict[str, Any], stake: Optional[float] = None) -> Dict[str, Any]:
-    state = load_state()
-    bet_id = int(state.get("next_bet_id", 1))
-    bank = float(state.get("bank", INITIAL_BANK))
-    default_stake = max(10.0, min(14.0, round(bank * 0.014, 2)))
-    stake_value = float(stake if stake is not None else selection.get("stake", default_stake))
-
-    bet = {
-        "id": bet_id,
-        "status": "OPEN",
-        "created_at": _now_iso(),
-        "sport": selection.get("sport", ""),
-        "match": selection.get("match", ""),
-        "market": selection.get("market", ""),
-        "selection": selection.get("selection", ""),
-        "odds": float(selection.get("odds", 0.0)),
-        "stake": stake_value,
-        "source": "telegram_v14_hotfix",
-        "note": "TEST MODE / NEED_ANALYSIS before real cash",
-    }
-    state["open_bets"].append(bet)
-    state["next_bet_id"] = bet_id + 1
-    save_state(state)
-    return bet
-
-
-def settle_bet(bet_id: int, result: str) -> Tuple[bool, str]:
-    result = result.upper().strip()
-    if result not in {"WIN", "LOSS", "PUSH"}:
-        return False, "Result must be WIN, LOSS or PUSH."
-
-    state = load_state()
-    open_bets = state.get("open_bets", [])
-    bet = next((b for b in open_bets if int(b.get("id", -1)) == bet_id and b.get("status") == "OPEN"), None)
-    if not bet:
-        return False, f"Open bet #{bet_id} not found."
-
-    stake = float(bet.get("stake", 0.0))
-    odds = float(bet.get("odds", 0.0))
-    if result == "WIN":
-        profit = round((odds - 1.0) * stake, 2)
-    elif result == "LOSS":
-        profit = -round(stake, 2)
-    else:
-        profit = 0.0
-
-    state["bank"] = round(float(state.get("bank", INITIAL_BANK)) + profit, 2)
-    bet["status"] = "SETTLED"
-    bet["result"] = result
-    bet["profit"] = profit
-    bet["settled_at"] = _now_iso()
-    state["results"].append(dict(bet))
-    save_state(state)
-
-    sign = "+" if profit > 0 else ""
-    return True, f"#{bet_id} {result} | P/L: {sign}{profit:.2f} | Bank: {state['bank']:.2f} UAH"
-
-
-# ---------- Helpers ----------
-def conf_for(sport_key: str, market_key: str) -> float:
-    base = sport_key.split("_")[0]
-    table = SPORT_CONF.get(base, SPORT_CONF["default"])
-    return float(table.get(market_key, SPORT_CONF["default"].get(market_key, 0.50)))
-
-
-def calc_ev(conf: float, odds: float) -> Tuple[float, float]:
-    if odds <= 1:
-        return -1.0, 0.0
+def _calc(conf: float, odds: float):
     ev = conf * (odds - 1) - (1 - conf)
-    raw_kelly = (conf * odds - 1) / (odds - 1)
-    kelly = max(raw_kelly * KELLY_FRACTION, 0.0)
+    raw_k = (conf * odds - 1) / (odds - 1) if odds > 1 else 0
+    kelly = max(raw_k * KELLY_FRACTION, 0)
     return ev, kelly
 
 
-def is_allowed_sport(sport_key: str) -> bool:
-    if sport_key not in ALLOWED_SPORTS:
-        return False
-    return not any(part in sport_key for part in BLOCKED_SPORT_KEY_PARTS)
+def _stake(kelly: float) -> float:
+    raw = kelly * _bank
+    return max(round(min(raw, _bank * 0.10), 0), 10.0)
 
 
-def format_point(point: Any) -> str:
-    if point is None:
-        return ""
-    try:
-        p = float(point)
-        return f" {p:+g}"
-    except Exception:
-        return f" {point}"
+def _passes(odds: float, conf: float):
+    tier = _get_tier(odds)
+    if tier is None:
+        return False, "odds out of range"
+    min_ev, min_kelly, min_conf = tier
+    ev, kelly = _calc(conf, odds)
+    if conf < min_conf:
+        return False, f"conf {conf:.0%} < {min_conf:.0%}"
+    if ev < min_ev:
+        return False, f"EV {ev:.3f} < {min_ev}"
+    if kelly < min_kelly:
+        return False, f"Kelly {kelly*100:.1f}% < {min_kelly*100:.1f}%"
+    return True, f"EV={ev:.3f} Kelly={kelly*100:.1f}% conf={conf:.0%}"
 
 
-def selection_key(event_id: str, market: str, name: str, point: Any) -> str:
-    return f"{event_id}|{market}|{name}|{point}"
+def _kb_pick(mid: int, stake: float):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"ACCEPT {int(stake)} UAH", callback_data=f"acc:{mid}:{int(stake)}"),
+        InlineKeyboardButton("SKIP", callback_data=f"skip:{mid}"),
+    ]])
 
 
-def kb_candidate(sid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ ACCEPT", callback_data=f"acc:{sid}"),
-            InlineKeyboardButton("❌ SKIP", callback_data=f"skip:{sid}"),
-        ]
-    ])
+def _kb_settle(bet_id: int):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("WIN", callback_data=f"win:{bet_id}"),
+        InlineKeyboardButton("LOSS", callback_data=f"loss:{bet_id}"),
+        InlineKeyboardButton("PENDING", callback_data=f"pend:{bet_id}"),
+    ]])
 
 
-def kb_settle(bet_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("WIN", callback_data=f"win:{bet_id}"),
-            InlineKeyboardButton("LOSS", callback_data=f"loss:{bet_id}"),
-            InlineKeyboardButton("PUSH", callback_data=f"push:{bet_id}"),
-        ]
-    ])
-
-
-def kb_done(label: str) -> InlineKeyboardMarkup:
+def _kb_done(label: str):
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="noop")]])
 
 
+def _conf_for(sport_key: str, market_key: str) -> float:
+    sport_base = sport_key.split("_")[0]
+    table = SPORT_CONF.get(sport_base, SPORT_CONF["default"])
+    return table.get(market_key, table.get("default", 0.51))
+
+
 async def safe_send(bot, chat_id: int, text: str, **kwargs):
-    """Send without crashing the whole bot on Telegram limits/errors."""
     try:
         return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
-    except RetryAfter as e:
-        wait = int(getattr(e, "retry_after", 3)) + 1
-        logger.warning("Telegram RetryAfter: sleeping %ss", wait)
-        await asyncio.sleep(wait)
-        try:
-            return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
-        except Exception as e2:
-            logger.warning("Telegram send failed after retry: %s", e2)
-            return None
-    except (TimedOut, NetworkError) as e:
-        logger.warning("Telegram network issue: %s", e)
-        await asyncio.sleep(2)
-        return None
-    except BadRequest as e:
-        logger.warning("Telegram BadRequest skipped: %s", e)
-        return None
     except Exception as e:
-        logger.exception("Telegram send failed: %s", e)
+        logger.exception("Send failed: %s", e)
         return None
 
 
-# ---------- Odds scan ----------
-async def fetch_candidates() -> List[Dict[str, Any]]:
+async def fetch_picks() -> list:
     if not ODDS_KEY:
-        logger.warning("ODDS_API_KEY not set")
+        logger.warning("No ODDS_API_KEY — returning empty list")
         return []
 
-    candidates_by_key: Dict[str, Dict[str, Any]] = {}
-
+    picks = []
     async with httpx.AsyncClient(timeout=15.0) as client:
-        try:
-            r = await client.get("https://api.the-odds-api.com/v4/sports", params={"apiKey": ODDS_KEY})
-            r.raise_for_status()
-            active = [s.get("key") for s in r.json() if s.get("active") and s.get("key")]
-        except Exception as e:
-            logger.warning("Sports fetch failed: %s", e)
+        r = await client.get("https://api.the-odds-api.com/v4/sports", params={"apiKey": ODDS_KEY})
+        if r.status_code != 200:
+            logger.error("Sports list error: %s %s", r.status_code, r.text[:300])
             return []
 
-        sports_to_scan = [s for s in active if is_allowed_sport(s)]
-        logger.info("Allowed sports scanned: %s", sports_to_scan)
+        active = [s["key"] for s in r.json() if s.get("active")]
+        if ALLOWED_SPORTS:
+            active = [s for s in active if s in ALLOWED_SPORTS]
+        logger.info("Active allowed sports: %s", active)
 
-        for sport_key in sports_to_scan:
+        for sport_key in active:
             try:
                 r2 = await client.get(
                     f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
                     params={
                         "apiKey": ODDS_KEY,
-                        "regions": "us,eu,uk,au",
+                        "regions": "eu,uk",
                         "markets": ",".join(ALLOWED_MARKETS),
                         "oddsFormat": "decimal",
                     },
-                    timeout=12.0,
+                    timeout=10.0,
                 )
                 if r2.status_code != 200:
-                    logger.info("%s skipped: HTTP %s", sport_key, r2.status_code)
+                    logger.warning("%s odds error: %s", sport_key, r2.status_code)
                     continue
                 events = r2.json()
             except Exception as e:
-                logger.warning("%s odds fetch failed: %s", sport_key, e)
+                logger.warning("%s: %s", sport_key, e)
                 continue
 
             for event in events:
-                event_id = event.get("id", uuid.uuid4().hex[:8])
-                home = event.get("home_team") or ""
-                away = event.get("away_team") or ""
+                home = event.get("home_team", "")
+                away = event.get("away_team", "")
                 if not home or not away:
                     continue
                 match_name = f"{home} vs {away}"
-                commence_time = event.get("commence_time", "")
+                bookmakers = event.get("bookmakers", [])
+                if not bookmakers:
+                    continue
 
-                for bookmaker in event.get("bookmakers", []) or []:
-                    book = bookmaker.get("title") or bookmaker.get("key") or "book"
-                    for market in bookmaker.get("markets", []) or []:
-                        mk = market.get("key", "")
-                        if mk not in ALLOWED_MARKETS:
+                per_match = 0
+                for market in bookmakers[0].get("markets", []):
+                    mk = market.get("key", "")
+                    if mk not in ALLOWED_MARKETS:
+                        continue
+                    conf = _conf_for(sport_key, mk)
+                    for outcome in market.get("outcomes", []):
+                        if per_match >= MAX_OPTIONS_PER_MATCH:
+                            break
+                        odds = float(outcome.get("price", 0.0) or 0.0)
+                        if not (1.80 <= odds <= 5.00):
                             continue
-                        conf = conf_for(sport_key, mk)
+                        name = outcome.get("name", "")
+                        ev, kelly = _calc(conf, odds)
+                        picks.append({
+                            "match": match_name,
+                            "sport": sport_key,
+                            "market": mk,
+                            "selection": name,
+                            "odds": odds,
+                            "conf": conf,
+                            "ev": ev,
+                            "kelly": kelly,
+                        })
+                        per_match += 1
+                    if per_match >= MAX_OPTIONS_PER_MATCH:
+                        break
 
-                        for outcome in market.get("outcomes", []) or []:
-                            name = outcome.get("name") or ""
-                            odds = float(outcome.get("price") or 0.0)
-                            point = outcome.get("point")
-                            if not name or not (1.30 <= odds <= 4.50):
-                                continue
-
-                            ev, kelly = calc_ev(conf, odds)
-                            # This is only a rough candidate ranking. Do not present as final value.
-                            if ev < -0.02:
-                                continue
-
-                            sel_name = f"{name}{format_point(point)}"
-                            key = selection_key(str(event_id), mk, name, point)
-                            existing = candidates_by_key.get(key)
-                            if existing and existing["odds"] >= odds:
-                                continue
-
-                            candidates_by_key[key] = {
-                                "sport": sport_key,
-                                "match": match_name,
-                                "commence_time": commence_time,
-                                "market": mk,
-                                "selection": sel_name,
-                                "odds": odds,
-                                "book": book,
-                                "conf_est": conf,
-                                "ev_est": ev,
-                                "kelly_est": kelly,
-                            }
-
-    candidates = list(candidates_by_key.values())
-    candidates.sort(key=lambda x: (x.get("ev_est", 0.0), x.get("odds", 0.0)), reverse=True)
-    return candidates
+    picks.sort(key=lambda p: (p["ev"], p["kelly"]), reverse=True)
+    logger.info("Total raw picks: %d", len(picks))
+    return picks
 
 
-async def scan(app: Application, chat_id: Optional[int] = None) -> None:
-    target_chat = chat_id or CHAT_ID
-    if not target_chat:
-        logger.warning("No chat_id available for scan output")
-        return
-
+async def scan(app=None):
     logger.info("SCAN START")
-    candidates = await fetch_candidates()
-    bank = get_bank()
+    raw = await fetch_picks()
 
-    if not candidates:
-        await safe_send(app.bot, target_chat, f"🔍 Scan finished: no candidates. Bank: {bank:.2f} UAH")
+    passed, skipped = [], []
+    for p in raw:
+        ok, reason = _passes(p["odds"], p["conf"])
+        if ok:
+            passed.append((p, reason))
+        else:
+            skipped.append((p, reason))
+
+    logger.info("Passed: %d Skipped: %d", len(passed), len(skipped))
+
+    if not CHAT_ID:
+        logger.warning("CHAT_ID missing; scan cannot send messages")
         return
 
-    # Limit globally, then per match.
-    per_match_count: Dict[str, int] = {}
-    limited: List[Dict[str, Any]] = []
-    for c in candidates:
-        m = c["match"]
-        if per_match_count.get(m, 0) >= MAX_OPTIONS_PER_MATCH:
-            continue
-        limited.append(c)
-        per_match_count[m] = per_match_count.get(m, 0) + 1
-        if len(limited) >= MAX_MATCHES_TO_SEND:
-            break
+    if not passed:
+        msg = f"Scan complete: 0 picks passed filters\nSkipped {len(skipped)} | Bank: {_bank:.0f} UAH"
+        if app:
+            await safe_send(app.bot, CHAT_ID, msg)
+        return
 
-    logger.info("Candidates total=%s sent=%s", len(candidates), len(limited))
-
+    n = _settled_count()
+    mode = "BOOTSTRAP" if n < BOOTSTRAP_THRESHOLD else "TRAINED"
     header = (
-        f"📊 Scan v14 HOTFIX | {datetime.now(UTC).strftime('%d %b %H:%M')} UTC\n"
-        f"Bank: {bank:.2f} UAH | Mode: TEST\n"
-        f"Sports: {', '.join(sorted(ALLOWED_SPORTS))}\n"
-        f"Sent: {len(limited)} / Found: {len(candidates)}\n\n"
-        "⚠️ Это НЕ финальные ставки. Это кандидаты для анализа v29.1.\n"
+        f"Daily Scan — {datetime.now(UTC).strftime('%d %b %Y %H:%M')} UTC\n"
+        f"Mode: {mode} ({n}/{BOOTSTRAP_THRESHOLD} settled)\n"
+        f"Picks: {len(passed)} passed / {len(skipped)} filtered\n"
+        f"Bank: {_bank:.0f} UAH"
     )
-    await safe_send(app.bot, target_chat, header)
+    if app:
+        await safe_send(app.bot, CHAT_ID, header)
 
-    copy_lines = []
-    for i, c in enumerate(limited[:MAX_COPY_LINES], 1):
-        copy_lines.append(
-            f"{i}) {c['sport']} | {c['match']} | {c['market'].upper()} {c['selection']} @ {c['odds']} "
-            f"({c['book']}) | roughEV {c['ev_est']:+.3f}"
-        )
-    if copy_lines:
-        await safe_send(app.bot, target_chat, "📋 COPY TO CHATGPT/PERPLEXITY:\n" + "\n".join(copy_lines))
-
-    for c in limited:
-        sid = uuid.uuid4().hex[:10]
-        _pending[sid] = c
+    for pick, reason in passed[:MAX_MATCHES_TO_SEND]:
+        odds = pick["odds"]
+        conf = pick["conf"]
+        ev = pick["ev"]
+        kelly = pick["kelly"]
+        stake = _stake(kelly)
         text = (
-            f"🏟 {c['sport']}\n"
-            f"{c['match']}\n"
-            f"Start: {c.get('commence_time') or 'unknown'}\n\n"
-            f"Market: {c['market'].upper()}\n"
-            f"Selection: {c['selection']}\n"
-            f"Odds: {c['odds']} | Book: {c['book']}\n"
-            f"Rough EV: {c['ev_est']:+.3f} | Conf est: {c['conf_est']:.0%}\n\n"
-            "STATUS: NEED_ANALYSIS\n"
-            "Gate: scenario → ENV → line movement → injuries → EV_CI_Low → stake"
+            f"{pick['sport'].upper()}\n"
+            f"{pick['match']}\n"
+            f"{pick['market'].upper()}: {pick['selection']}\n\n"
+            f"Odds: {odds} | Conf: {conf:.0%}\n"
+            f"EV: {ev:+.3f} | Kelly: {kelly*100:.1f}%\n"
+            f"Stake: {int(stake)} UAH"
         )
-        await safe_send(app.bot, target_chat, text, reply_markup=kb_candidate(sid))
-        await asyncio.sleep(0.4)
+        if app:
+            sent = await safe_send(app.bot, CHAT_ID, text, reply_markup=_kb_pick(0, stake))
+            if sent:
+                mid = sent.message_id
+                _pending[mid] = {**pick, "stake": stake}
+                try:
+                    await sent.edit_reply_markup(reply_markup=_kb_pick(mid, stake))
+                except Exception as e:
+                    logger.warning("edit markup failed: %s", e)
+        await asyncio.sleep(0.25)
 
     logger.info("SCAN DONE")
 
 
-# ---------- Commands ----------
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "🤖 Betting Bot v14 HOTFIX\n"
-        "Anti-spam mode ON. Startup scan disabled.\n\n"
-        "Commands:\n"
-        "/scan - manual scan top candidates\n"
-        "/bank - current test bank\n"
-        "/bets - open bets\n"
-        "/stats - settled stats\n"
-        "/settle <id> win|loss|push\n"
-        "/help"
-    )
-
-
-async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🔍 Manual scan started. I will send only limited candidates.")
-    await scan(context.application, chat_id=update.effective_chat.id)
-
-
-async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state = load_state()
-    settled_profit = sum(float(r.get("profit", 0.0)) for r in state.get("results", []))
-    await update.message.reply_text(
-        f"💰 Bank: {float(state.get('bank', INITIAL_BANK)):.2f} UAH\n"
-        f"Mode: {state.get('mode', 'TEST')}\n"
-        f"P/L: {settled_profit:+.2f} UAH\n"
-        f"Open: {sum(1 for b in state.get('open_bets', []) if b.get('status') == 'OPEN')}"
-    )
-
-
-async def cmd_bets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state = load_state()
-    open_bets = [b for b in state.get("open_bets", []) if b.get("status") == "OPEN"]
-    if not open_bets:
-        await update.message.reply_text("No open bets.")
-        return
-    lines = [f"Open bets: {len(open_bets)}"]
-    for b in open_bets[:20]:
-        lines.append(
-            f"#{b['id']} | {b.get('match','')[:36]} | {b.get('market','').upper()} "
-            f"{b.get('selection','')} @{b.get('odds')} | stake {b.get('stake')}"
-        )
-    await update.message.reply_text("\n".join(lines))
-
-
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state = load_state()
-    results = state.get("results", [])
-    if not results:
-        await update.message.reply_text("No settled bets yet.")
-        return
-    wins = sum(1 for r in results if r.get("result") == "WIN")
-    losses = sum(1 for r in results if r.get("result") == "LOSS")
-    pushes = sum(1 for r in results if r.get("result") == "PUSH")
-    profit = sum(float(r.get("profit", 0.0)) for r in results)
-    turnover = sum(float(r.get("stake", 0.0)) for r in results if r.get("result") != "PUSH")
-    roi = (profit / turnover * 100) if turnover else 0.0
-    await update.message.reply_text(
-        f"📊 Stats\n"
-        f"Settled: {len(results)} | W-L-P: {wins}-{losses}-{pushes}\n"
-        f"ROI: {roi:+.1f}% | Profit: {profit:+.2f} UAH\n"
-        f"Bank: {float(state.get('bank', INITIAL_BANK)):.2f} UAH"
-    )
-
-
-async def cmd_settle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    args = context.args or []
-    if len(args) != 2 or not args[0].isdigit():
-        await update.message.reply_text("Usage: /settle <id> win|loss|push")
-        return
-    ok, msg = settle_bet(int(args[0]), args[1])
-    await update.message.reply_text(("✅ " if ok else "⚠️ ") + msg)
-
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_start(update, context)
-
-
-# ---------- Callbacks ----------
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _bank, _bet_counter
     q = update.callback_query
     data = (q.data or "").strip()
     try:
@@ -538,16 +341,214 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "noop":
         return
 
-    if data.startswith("skip:"):
-        sid = data.split(":", 1)[1]
-        _pending.pop(sid, None)
+    if data.startswith("acc:"):
+        parts = data.split(":")
+        mid = int(parts[1])
+        stake = float(parts[2])
+        info = _pending.pop(mid, None)
+        if not info:
+            await q.message.reply_text("Pick expired. Run /scan.")
+            return
+
         try:
-            await q.message.edit_reply_markup(reply_markup=kb_done("Skipped"))
+            await q.message.edit_reply_markup(reply_markup=_kb_done(f"Accepted {int(stake)} UAH"))
+        except Exception:
+            pass
+
+        _bet_counter += 1
+        bid = _bet_counter
+        _open_bets[bid] = {
+            **info,
+            "id": bid,
+            "placed_at": datetime.now(UTC).isoformat(),
+            "status": "OPEN",
+        }
+        await q.message.reply_text(
+            f"Bet #{bid} registered\n"
+            f"{info['match']}\n"
+            f"{info['market'].upper()}: {info['selection']}\n"
+            f"Odds: {info['odds']} | Stake: {int(stake)} UAH\n\n"
+            f"Settle when done:",
+            reply_markup=_kb_settle(bid),
+        )
+        return
+
+    if data.startswith("skip:"):
+        mid = int(data.split(":")[1])
+        _pending.pop(mid, None)
+        try:
+            await q.message.edit_reply_markup(reply_markup=_kb_done("Skipped"))
         except Exception:
             pass
         return
 
-    if data.startswith("acc:"):
-        sid = data.split(":", 1)[1]
-        selection = _pending.pop(sid, None)
-        if not selec
+    if data.startswith("win:"):
+        bid = int(data.split(":")[1])
+        bet = _open_bets.get(bid)
+        if not bet:
+            await q.message.reply_text("Bet not found.")
+            return
+        profit = round((bet["odds"] - 1.0) * bet["stake"], 2)
+        _bank += profit
+        _results.append({**bet, "result": "WON", "profit": profit, "settled_at": datetime.now(UTC).isoformat()})
+        bet["status"] = "SETTLED"
+        try:
+            await q.message.edit_reply_markup(reply_markup=_kb_done(f"WIN +{profit} UAH"))
+        except Exception:
+            pass
+        await q.message.reply_text(
+            f"WIN — Bet #{bid}\n{bet['match']}\nProfit: +{profit} UAH\nBank: {_bank:.0f} UAH"
+        )
+        return
+
+    if data.startswith("loss:"):
+        bid = int(data.split(":")[1])
+        bet = _open_bets.get(bid)
+        if not bet:
+            await q.message.reply_text("Bet not found.")
+            return
+        loss = -round(bet["stake"], 2)
+        _bank += loss
+        _results.append({**bet, "result": "LOST", "profit": loss, "settled_at": datetime.now(UTC).isoformat()})
+        bet["status"] = "SETTLED"
+        try:
+            await q.message.edit_reply_markup(reply_markup=_kb_done(f"LOSS {loss} UAH"))
+        except Exception:
+            pass
+        await q.message.reply_text(
+            f"LOSS — Bet #{bid}\n{bet['match']}\nLoss: {loss} UAH\nBank: {_bank:.0f} UAH"
+        )
+        return
+
+    if data.startswith("pend:"):
+        try:
+            await q.message.edit_reply_markup(reply_markup=_kb_done("Pending"))
+        except Exception:
+            pass
+        return
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Betting Bot RECOVERY is alive.\n\n"
+        "Commands:\n"
+        "/scan — run scan now\n"
+        "/stats — performance stats\n"
+        "/bank — current bankroll\n"
+        "/bets — open bets\n"
+        "/help — this message"
+    )
+
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Scanning...")
+    await scan(context.application)
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    n = len(_results)
+    if n == 0:
+        await update.message.reply_text("No settled bets yet.")
+        return
+    wins = sum(1 for r in _results if r["result"] == "WON")
+    profit = sum(r["profit"] for r in _results)
+    staked = sum(r["stake"] for r in _results)
+    roi = profit / staked * 100 if staked else 0
+    await update.message.reply_text(
+        f"Stats\n"
+        f"Settled: {n} | Wins: {wins} | WR: {wins/n*100:.1f}%\n"
+        f"Profit: {profit:+.0f} UAH\n"
+        f"ROI: {roi:+.1f}%\n"
+        f"Bank: {_bank:.0f} UAH"
+    )
+
+
+async def cmd_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"Bank: {_bank:.0f} UAH\n"
+        f"Initial: {INITIAL_BANK:.0f} UAH\n"
+        f"P&L: {_bank - INITIAL_BANK:+.0f} UAH\n"
+        f"Settled bets: {_settled_count()}"
+    )
+
+
+async def cmd_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    open_b = [b for b in _open_bets.values() if b.get("status") == "OPEN"]
+    if not open_b:
+        await update.message.reply_text("No open bets.")
+        return
+    lines = [f"Open bets ({len(open_b)})"]
+    for b in open_b:
+        lines.append(f"#{b['id']} {b['match']} | {b['selection']} | @{b['odds']} stake {b['stake']:.0f}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await cmd_start(update, context)
+
+
+scheduler = AsyncIOScheduler(timezone="UTC")
+
+
+async def post_init(app: Application):
+    print("BOOT: post_init called", flush=True)
+    me = await app.bot.get_me()
+    print(f"BOOT: get_me OK @{me.username} id={me.id}", flush=True)
+    logger.info("Bot init complete. Daily scan enabled=%s", DAILY_SCAN_ENABLED)
+
+    if DAILY_SCAN_ENABLED:
+        if not scheduler.running:
+            scheduler.start()
+        scheduler.add_job(
+            scan,
+            "cron",
+            hour=DAILY_SCAN_HOUR_UTC,
+            minute=0,
+            kwargs={"app": app},
+            id="daily_scan",
+            replace_existing=True,
+            max_instances=1,
+        )
+        logger.info("Scheduler started — daily scan @ %02d:00 UTC", DAILY_SCAN_HOUR_UTC)
+    else:
+        logger.info("Daily scan disabled. Use /scan manually.")
+
+    if STARTUP_MESSAGE_ENABLED and CHAT_ID:
+        await safe_send(app.bot, CHAT_ID, "Betting Bot RECOVERY started. Use /start or /bank.")
+
+
+async def post_stop(app: Application):
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+
+
+def main():
+    print("BOOT: main() entered", flush=True)
+    print(f"BOOT: TOKEN_SET={bool(TOKEN)} ODDS_KEY_SET={bool(ODDS_KEY)} CHAT_ID={CHAT_ID}", flush=True)
+    print(f"BOOT: ALLOWED_SPORTS={sorted(ALLOWED_SPORTS)}", flush=True)
+
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
+
+    builder = Application.builder().token(TOKEN).post_init(post_init).post_stop(post_stop)
+    app = builder.build()
+    print("BOOT: application built", flush=True)
+
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("bank", cmd_bank))
+    app.add_handler(CommandHandler("bets", cmd_bets))
+    app.add_handler(CommandHandler("help", cmd_help))
+
+    print("BOOT: handlers registered", flush=True)
+    logger.info("Polling started")
+    print("BOOT: run_polling starting", flush=True)
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    print("BOOT: __main__ block", flush=True)
+    main()
+    
